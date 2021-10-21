@@ -1,8 +1,6 @@
 pipeline {
     parameters {
-        string(name: 'SOURCE_AWS_REGION', defaultValue: 'us-east-1', description: 'Location of AMI to test')
-        string(name: 'ARTIFACT_WEB_URL', defaultValue: 'latest', description: 'URL of deb (or RPM) repo created by unified-deb (or CentOS-RPM) process. Use when not available on jenkins, or when running on AWS, which will download faster from S3.')
-        string(name: 'REPO', defaultValue: 'http://downloads.scylladb.com/unstable/scylla/master/deb/unified/2021-08-26T12:02:36Z/scylladb-master/scylla.list', description: '')
+        string(name: 'REPO', defaultValue: '', description: 'repo url for AMI')
     }
 
     agent {
