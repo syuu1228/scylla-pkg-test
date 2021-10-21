@@ -7,7 +7,7 @@ pipeline {
 
     agent {
         label {
-            label "packager"
+            label "ran"
         }
     }
 
