@@ -18,7 +18,7 @@ if __name__ == '__main__':
     ami_env = os.environ.copy()
     ami_env['DOCKER_IMAGE'] = 'image_ubuntu20.04'
     ami_env['DPACKAGER_TOOL'] = 'podman'
-    run(f'../../../tools/packaging/dpackager -- ./build_deb_image.sh --product scylla --repo {args.repo} --log-file build/gce-image.log', cwd='./scylla-machine-image/gce/image', shell=True, check=True, env=ami_env)
+    run(f'../../../tools/packaging/dpackager -e GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS -v $GOOGLE_APPLICATION_CREDENTIALS:$GOOGLE_APPLICATION_CREDENTIALS -- ./build_deb_image.sh --product scylla --repo {args.repo} --log-file build/gce-image.log', cwd='./scylla-machine-image/gce/image', shell=True, check=True, env=ami_env)
     with open('./scylla-machine-image/gce/image/build/gce-image.log') as f:
         ami_log = f.read()
     match = re.search(r'A disk image was created: (.+)$', ami_log, flags=re.MULTILINE)

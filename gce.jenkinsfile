@@ -13,6 +13,7 @@ pipeline {
         stage('build') {
             steps {
                 script {
+                    withCredentials([file(credentialsId: 'google_jenkins_key_scylla_images', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
                     sh "python3 ./gce.py --repo ${params.REPO}"
                 }
             }
