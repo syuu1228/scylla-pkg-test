@@ -1,0 +1,3 @@
+[submodule "scylla-machine-image"]
+	path = scylla-machine-image
+	url = git@github.com:scylladb/scylla-machine-image.git

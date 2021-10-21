@@ -1,0 +1,201 @@
+#!/bin/bash
+
+here="$(realpath $(dirname "$0"))"
+toplevel="$(realpath "$here/../..")"
+group_args=()
+docker_args=()
+if env | grep DOCKER_IMAGE >/dev/null ; then
+        image_file=${DOCKER_IMAGE}
+else
+        image_file="image_fedora-33"
+fi
+image="$(<"$here/$image_file")"
+echo $image
+
+if which docker >/dev/null 2>&1 ; then
+  container_tool=${DPACKAGER_TOOL-docker}
+elif which podman >/dev/null 2>&1 ; then
+  container_tool=${DPACKAGER_TOOL-podman}
+else
+  die "Please make sure you install either podman or docker on this machine to run dbuild"
+fi
+
+
+for gid in $(id -G); do
+    group_args+=(--group-add "$gid")
+done
+
+interactive=
+
+function help () {
+    cat <<EOF 1>&2
+NAME
+    $(basename $0) - Run a command in Scylla packager $container_tool image.
+
+SYNOPSIS
+    $0 [OPTIONS --] [command [arg ...]]
+
+DESCRIPTION
+    $(basename $0) is used mainly to run scylla-pkg scripts in a docker image containing
+    a frozen version of the OS requirements
+
+    When no command is provided, $(basename $0) runs an interactive shell in
+    the docker instance.  The image to use is taken by default from "$(dirname $0)/image".
+    It may be overriden using the --image option.
+
+    When providing docker options, the options list must be terminated with \`--'.
+
+OPTIONS
+   -h | --help
+       Print this help message.
+
+   --image [IMAGE]
+       Use the specified docker IMAGE.
+       If omitted, list the available images using \`docker image ls'
+
+   -i | --interactive
+       Run an interactive session.
+
+   See \`docker help run' for available options.
+EOF
+    exit 0
+}
+
+function die () {
+    msg="$1"
+    if [[ -n "$msg" ]]; then
+        echo "$(basename $0): $msg." 1>&2
+    fi
+    cat <<EOF 1>&2
+
+Run \`$0 --help' to print the full help message.
+EOF
+    exit 1
+}
+
+if [[ $# -eq 0 ]]; then
+    interactive=y
+    docker_args=(-it)
+elif [[ "$1" = -* ]]; then
+    while [[ "$1" != "--" && $# != 0 ]]; do
+	case "$1" in
+            -h|--help)
+                help
+                ;;
+            --image)
+                image="$2"
+                shift 2
+                if [[ -z "$image" ]]; then
+                    die "Expected docker image identifier to follow the --image option"
+                fi
+                if ! $container_tool image inspect "$image" >/dev/null && ! $container_tool image pull "$image"; then
+                    die
+                fi
+                continue
+                ;;
+	    --*)
+		if [[ "$1" = --interactive || "$1" = --interactive=true ]]; then
+		    interactive=y
+		fi
+		;;
+	    -*)
+		if [[ "$1" = -*i* ]]; then
+		    interactive=y
+		fi
+		;;
+	    *)
+		;;
+	esac
+	docker_args+=("$1")
+	shift
+    done
+    if [[ "$1" != "--" ]]; then
+        die "Expected '--' to terminate docker flag list"
+    fi
+    shift
+fi
+
+if [[ $# != 0 ]]; then
+    args=("$@")
+else
+    args=(/bin/bash -i)
+fi
+
+MAVEN_LOCAL_REPO="$HOME/.m2"
+
+mkdir -p "$MAVEN_LOCAL_REPO"
+
+is_podman="$($container_tool --help | grep -o podman)"
+
+docker_common_args=()
+
+if [ -z "$is_podman" ]; then
+    docker_common_args+=(
+       -u "$(id -u):$(id -g)"
+       "${group_args[@]}"
+       -v /etc/passwd:/etc/passwd:ro
+       -v /etc/group:/etc/group:ro
+       -v /etc/sudoers:/etc/sudoers:ro
+       )
+fi
+
+if [ "$PWD" != "$toplevel" ]; then
+     docker_common_args+=(-v "$toplevel:$toplevel:z")
+fi
+
+docker_common_args+=(
+       --network host \
+       --cap-add SYS_PTRACE \
+       -v "$PWD:$PWD:z" \
+       -v "$MAVEN_LOCAL_REPO:$MAVEN_LOCAL_REPO:z" \
+       -v "$HOME:$HOME"
+       -v /etc/localtime:/etc/localtime:ro \
+       -w "$PWD" \
+       -e HOME \
+       "${docker_args[@]}" \
+       "$image" \
+       "${args[@]}"
+)
+
+if [[ -n "$interactive" || -n "$is_podman" ]]; then
+    # If --interactive was given on the command line, we can't run in detached mode
+    # as it will be impossible to interact with the container.
+
+    # We also avoid detached mode with podman, which doesn't need it
+    # (it does not proxy SIGTERM) and doesn't work well with it.
+    $container_tool run --rm "${docker_common_args[@]}"
+    ret=$?
+    exit $ret
+fi
+
+container=$(
+    $container_tool run \
+       "--detach=true" \
+       "${docker_common_args[@]}"
+)
+
+kill_it() {
+    if [[ -n "$container" ]]; then
+        $container_tool rm -f "$container" > /dev/null
+        container=
+    fi
+}
+
+trap kill_it SIGTERM SIGINT SIGHUP EXIT
+
+$container_tool logs --follow "$container"
+
+if [[ -n "$container" ]]; then
+    exitcode="$($container_tool wait "$container")"
+else
+    exitcode=99
+fi
+
+kill_it
+
+trap - SIGTERM SIGINT SIGHUP EXIT
+
+# after "docker kill", docker wait will not print anything
+[[ -z "$exitcode" ]] && exitcode=1
+
+exit "$exitcode"

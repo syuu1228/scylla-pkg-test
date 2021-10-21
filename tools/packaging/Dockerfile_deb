@@ -1,0 +1,9 @@
+FROM ubuntu:20.04
+
+ADD ./tools/packaging/install-dependencies.sh ./
+ADD ./tools/packaging/system-auth ./
+
+RUN apt-get -y update && ./install-dependencies.sh \
+    && echo 'ALL ALL=(ALL:ALL) NOPASSWD: ALL' >> /etc/sudoers \
+    && cp system-auth /etc/pam.d \
+    && echo 'Defaults !requiretty' >> /etc/sudoers

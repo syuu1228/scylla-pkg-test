@@ -1,0 +1,22 @@
+pipeline {
+    parameters {
+    }
+
+    agent {
+        label {
+            label "built-in"
+        }
+    }
+
+    environment {
+        AWS_ACCESS_KEY_ID     = credentials('jenkins2-aws-secret-key-id')
+        AWS_SECRET_ACCESS_KEY = credentials('jenkins2-aws-secret-access-key')
+    }
+
+    stages {
+        stage('build') {
+            sh "python3 ./ami.py"
+        }
+    }
+}
+
