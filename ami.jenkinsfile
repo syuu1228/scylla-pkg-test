@@ -1,6 +1,5 @@
 pipeline {
     parameters {
-		string(name: 'X86_NODE_PARAM', defaultValue: 'packager', description: 'On which node to run the ami build. Useful options: packager,loki,dgccd201,thor,ran,huginn,muninn.')
         string(name: 'SOURCE_AWS_REGION', defaultValue: 'us-east-1', description: 'Location of AMI to test')
         string(name: 'ARTIFACT_WEB_URL', defaultValue: 'latest', description: 'URL of deb (or RPM) repo created by unified-deb (or CentOS-RPM) process. Use when not available on jenkins, or when running on AWS, which will download faster from S3.')
         string(name: 'REPO', defaultValue: 'http://downloads.scylladb.com/unstable/scylla/master/deb/unified/2021-08-26T12:02:36Z/scylladb-master/scylla.list', description: '')
@@ -8,7 +7,7 @@ pipeline {
 
     agent {
         label {
-            label "built-in"
+            label "packager"
         }
     }
 
@@ -21,9 +20,7 @@ pipeline {
         stage('build') {
             steps {
                 script {
-                    node(params.X86_NODE_PARAM) {
-                        sh("python3 ./ami.py --repo ${params.REPO}")
-                    }
+                    sh("python3 ./ami.py --repo ${params.REPO}")
                 }
             }
         }
