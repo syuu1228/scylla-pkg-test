@@ -18,7 +18,7 @@ if __name__ == '__main__':
     ami_env = os.environ.copy()
     ami_env['DOCKER_IMAGE'] = 'image_ubuntu20.04'
     ami_env['DPACKAGER_TOOL'] = 'podman'
-    run(f'bash -x ../../../tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- ./build_deb_ami.sh --product scylla --repo {args.repo} --log-file ami.log', cwd='./scylla-machine-image/aws/ami', shell=True, check=True, env=ami_env)
+    run(f'../../../tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- ./build_deb_ami.sh --product scylla --repo {args.repo} --log-file ami.log', cwd='./scylla-machine-image/aws/ami', shell=True, check=True, env=ami_env)
     with open('./scylla-machine-image/aws/ami/build/ami.log') as f:
         ami_log = f.read()
     match = re.search(r'^us-east-1: (.+)$', ami_log, flags=re.MULTILINE)
