@@ -4,6 +4,10 @@ import re
 import shutil
 from subprocess import run
 
+print('--- enviroment variables ---')
+print(os.environ)
+print('------')
+
 repo = 'http://downloads.scylladb.com/unstable/scylla/master/deb/unified/2021-08-26T12:02:36Z/scylladb-master/scylla.list'
 
 shutil.copyfile('./json_files/ami_variables.json', './scylla-machine-image/aws/ami/variables.json')
