@@ -15,7 +15,9 @@ pipeline {
 
     stages {
         stage('build') {
-            sh "python3 ./ami.py"
+            steps {
+                sh "python3 ./ami.py"
+            }
         }
     }
 }
