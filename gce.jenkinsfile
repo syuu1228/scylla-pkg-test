@@ -1,0 +1,21 @@
+pipeline {
+    parameters {
+        string(name: 'REPO', defaultValue: 'http://downloads.scylladb.com/unstable/scylla/master/deb/unified/2021-08-26T12:02:36Z/scylladb-master/scylla.list', description: 'repo url for AMI')
+    }
+
+    agent {
+        label {
+            label "packager"
+        }
+    }
+
+    stages {
+        stage('build') {
+            steps {
+                script {
+                    sh "python3 ./gce.py --repo ${params.REPO}"
+                }
+            }
+        }
+    }
+}
