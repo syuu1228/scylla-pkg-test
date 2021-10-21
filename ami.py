@@ -17,7 +17,7 @@ if __name__ == '__main__':
     shutil.copyfile('./json_files/ami_variables.json', './scylla-machine-image/aws/ami/variables.json')
     ami_env = os.environ.copy()
     ami_env['DOCKER_IMAGE'] = 'image_ubuntu20.04'
-    run(f'../../../tools/packaging/dpackager ./build_deb_ami.sh --product scylla --repo {args.repo} --log-file ami.log', cwd='./scylla-machine-image/aws/ami', shell=True, check=True, env=ami_env)
+    run(f'bash -e ../../../tools/packaging/dpackager ./build_deb_ami.sh --product scylla --repo {args.repo} --log-file ami.log', cwd='./scylla-machine-image/aws/ami', shell=True, check=True, env=ami_env)
     with open('./scylla-machine-image/aws/ami/build/ami.log') as f:
         ami_log = f.read()
     match = re.search(r'^us-east-1: (.+)$', ami_log, flags=re.MULTILINE)
