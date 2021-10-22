@@ -1,6 +1,7 @@
 pipeline {
     parameters {
         string(name: 'REPO', defaultValue: 'http://downloads.scylladb.com/unstable/scylla/master/deb/unified/2021-08-26T12:02:36Z/scylladb-master/scylla.list', description: 'repo url for AMI')
+        string(name: 'TEST_EXISTING_AMI_ID', defaultValue: '', description: 'AMI ID to test. If empty - will build a new AMI')
         booleanParam(name: 'SKIP_TEST', defaultValue: false, description: 'Set to skip ami test - for debug use')
     }
 
@@ -19,7 +20,11 @@ pipeline {
         stage('build') {
             steps {
                 script {
-                    sh "python3 ./ami.py --repo ${params.REPO}"
+                    amiPyArgs = ''
+                    if (params.TEST_EXISTING_AMI_ID) {
+                        amiPyArgs = "--ami-id ${params.TEST_EXISTING_AMI_ID}"
+                    }
+                    sh "python3 ./ami.py --repo ${params.REPO} ${amiPyArgs}"
                 }
             }
         }
