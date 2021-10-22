@@ -16,6 +16,7 @@ gce_env['DOCKER_IMAGE'] = 'image_ubuntu20.04'
 gce_env['DPACKAGER_TOOL'] = 'podman'
 
 def dpackager(cmd, capture_output=False, encoding=None):
+    print(f'dpackager({cmd})')
     return run(f'{dpackager_cmd} -- {cmd}', cwd=dpackager_cwd, shell=True, check=True, env=gce_env, capture_output=capture_output, encoding=encoding)
 
 if __name__ == '__main__':
@@ -43,6 +44,7 @@ if __name__ == '__main__':
     with open('./json_files/gce_variables.json') as f:
         gce_vars = json.load(f)
     project_id = gce_vars['project_id']
+    print('project_id:{project_id}')
 
     dpackager('gcloud auth activate-service-account --key-file $GOOGLE_APPLICATION_CREDENTIALS')
     dpackager(f'gcloud config set project {project_id}')
