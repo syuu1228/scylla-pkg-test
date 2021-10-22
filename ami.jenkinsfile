@@ -40,6 +40,7 @@ pipeline {
                         error("Missing AMI ID. Expected property scylla_ami_id on file amiPropertiesFile created on build phase. Can't run tests")
                     } else {
                         node("aws-sct-builders-us-east-1-new") {
+                            checkout scm
                             sh "python3 ./ami_test.py --ami-id ${amiProperties.scylla_ami_id}"
                         }
                     }
