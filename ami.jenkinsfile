@@ -7,7 +7,7 @@ pipeline {
 
     agent {
         label {
-            label "packager"
+            label 'built-in'
         }
     }
 
@@ -20,12 +20,14 @@ pipeline {
         stage('build') {
             steps {
                 script {
-                    amiPyArgs = ''
-                    if (params.TEST_EXISTING_AMI_ID) {
-                        amiPyArgs = "--ami-id ${params.TEST_EXISTING_AMI_ID}"
+                    node('packager') {
+                        amiPyArgs = ''
+                        if (params.TEST_EXISTING_AMI_ID) {
+                            amiPyArgs = "--ami-id ${params.TEST_EXISTING_AMI_ID}"
+                        }
+                        sh "python3 ./ami.py --repo ${params.REPO} ${amiPyArgs}"
+                        amiProperties = readProperties file: "$WORKSPACE/amiId.properties"
                     }
-                    sh "python3 ./ami.py --repo ${params.REPO} ${amiPyArgs}"
-                    amiProperties = readProperties file: "$WORKSPACE/amiId.properties"
                 }
             }
         }
@@ -35,7 +37,7 @@ pipeline {
             }
             steps {
                 script {
-                    node("aws-sct-builders-us-east-1-new") {
+                    node('aws-sct-builders-us-east-1-new') {
                         if (amiProperties.scylla_ami_id.isEmpty()) {
                             currentBuild.result = 'FAILURE'
                             error("Missing AMI ID. Expected property scylla_ami_id on file amiPropertiesFile created on build phase. Can't run tests")
