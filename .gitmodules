@@ -1,3 +1,6 @@
 [submodule "scylla-machine-image"]
 	path = scylla-machine-image
 	url = git@github.com:scylladb/scylla-machine-image.git
+[submodule "scylla-cluster-tests"]
+	path = scylla-cluster-tests
+	url = git@github.com:scylladb/scylla-cluster-tests.git

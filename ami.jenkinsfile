@@ -1,6 +1,7 @@
 pipeline {
     parameters {
         string(name: 'REPO', defaultValue: 'http://downloads.scylladb.com/unstable/scylla/master/deb/unified/2021-08-26T12:02:36Z/scylladb-master/scylla.list', description: 'repo url for AMI')
+        booleanParam(name: 'SKIP_TEST', defaultValue: false, description: 'Set to skip ami test - for debug use')
     }
 
     agent {
@@ -19,6 +20,24 @@ pipeline {
             steps {
                 script {
                     sh "python3 ./ami.py --repo ${params.REPO}"
+                }
+            }
+        }
+        stage('test') {
+            when {
+                expression {! params.SKIP_TEST}
+            }
+            steps {
+                script {
+                    amiProperties = readProperties file: "$WORKSPACE/amiId.properties"
+                    if (amiProperties.scylla_ami_id.isEmpty()) {
+                        currentBuild.result = 'FAILURE'
+                        error("Missing AMI ID. Expected property scylla_ami_id on file amiPropertiesFile created on build phase. Can't run tests")
+                    } else {
+                        node("aws-sct-builders-us-east-1-new") {
+                            sh "python3 ./ami_test.py --ami-id ${amiProperties.scylla_ami_id}"
+                        }
+                    }
                 }
             }
         }
