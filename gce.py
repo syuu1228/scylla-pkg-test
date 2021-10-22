@@ -48,8 +48,13 @@ if __name__ == '__main__':
 
     dpackager('gcloud auth activate-service-account --key-file $GOOGLE_APPLICATION_CREDENTIALS')
     dpackager(f'gcloud config set project {project_id}')
-    image_info = dpackager(f'gcloud compute images describe {gce_image_name}', capture_output=True, encoding='utf-8').stdout.strip()
-    match = re.search(r'^id: \'(.+)\'$', describe, flags=re.MULTILINE)
+    try:
+        image_info = dpackager(f'gcloud compute images describe {gce_image_name}', capture_output=True, encoding='utf-8').stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f'returncode:{e.returncode}')
+        print(f'stdout:{e.stdout}')
+        print(f'stderr:{e.stderr}')
+    match = re.search(r'^id: \'(.+)\'$', image_info, flags=re.MULTILINE)
     if not match:
         print('Not able to find image id')
         sys.exit(1)
