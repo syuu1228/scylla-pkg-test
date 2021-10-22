@@ -4,7 +4,7 @@ import re
 import shutil
 import argparse
 import json
-from subprocess import run
+import subprocess
 
 gce_test_service_accout = 'serviceAccount:skilled-adapter-452@appspot.gserviceaccount.com'
 
@@ -17,7 +17,7 @@ gce_env['DPACKAGER_TOOL'] = 'podman'
 
 def dpackager(cmd, capture_output=False, encoding=None):
     print(f'dpackager({cmd})')
-    return run(f'{dpackager_cmd} -- {cmd}', cwd=dpackager_cwd, shell=True, check=True, env=gce_env, capture_output=capture_output, encoding=encoding)
+    return subprocess.run(f'{dpackager_cmd} -- {cmd}', cwd=dpackager_cwd, shell=True, check=True, env=gce_env, capture_output=capture_output, encoding=encoding)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -54,6 +54,7 @@ if __name__ == '__main__':
         print(f'returncode:{e.returncode}')
         print(f'stdout:{e.stdout}')
         print(f'stderr:{e.stderr}')
+        raise
     match = re.search(r'^id: \'(.+)\'$', image_info, flags=re.MULTILINE)
     if not match:
         print('Not able to find image id')
