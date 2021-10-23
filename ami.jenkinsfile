@@ -49,6 +49,9 @@ pipeline {
                             error("Missing AMI ID. Expected property scylla_ami_id on file amiPropertiesFile created on build phase. Can't run tests")
                         }
                         checkout scm
+                        sh "pip3 install virtualenv"
+                        sh "python3 -m virtualenv poc-venv"
+                        sh "source poc-venv/bin/activate && pip3 install invoke rich"
                         sh "poc-venv/bin/invoke ami.test --ami-id ${amiProperties.scylla_ami_id}"
                     }
                 }
