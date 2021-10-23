@@ -39,7 +39,7 @@ pipeline {
                             filter: "00-Build.txt",
                             fingerprintArtifacts: true,
                             projectName: artifactSourceJob,
-                            selector: [$class: 'SpecificBuildSelector', buildNumber: $artifactSourceJobNum],
+                            selector: [$class: 'SpecificBuildSelector', buildNumber: artifactSourceJobNum],
                             target: WORKSPACE,
                             optional: false
                         ])
