@@ -56,6 +56,8 @@ def getArtifact (Map args) {
 	} else {
 		echo "Download artifacts from Jenkins"
 		general.errorMissingMandatoryParam ("artifact.getArtifact download from jenkins:", [artifactSourceJobNum: "$args.artifactSourceJobNum"])
+        echo "CopyArtifact filter:${args.artifact} projectName: ${args.artifactSourceJob} buildNumber: $args.artifactSourceJobNum target: ${targetPath} optional: ${ignoreMissingArtifact}"
+
 		step([  $class: 'CopyArtifact',
 			filter: "${args.artifact}",
 			fingerprintArtifacts: true,

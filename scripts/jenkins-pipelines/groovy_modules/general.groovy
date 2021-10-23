@@ -189,6 +189,7 @@ def runOrDryRunS3Cmd (Map args) {
 		cmd += " --dryrun"
 	}
 	cmd += " $args.cmdArtifacts $recursiveFlag $excludeParam"
+    echo "S3cmd: ${cmd}"
 	if (toolInstalled (generalProperties.defaultContainerTool)) {
 		env.DPACKAGER_TOOL=generalProperties.defaultContainerTool
 		dpackagerAwsCommand = general.setAwsDpackagerCommand ("", "$WORKSPACE/${gitProperties.scyllaPkgCheckoutDir}")
