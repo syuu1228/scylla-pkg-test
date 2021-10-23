@@ -1,0 +1,407 @@
+#!groovy
+// Pipeline unified-deb
+// In order to debug, set branch on Jenkins job pipeline section and /or parameter with value of the debug branch.
+// Parameter is used to run sh scripts, pipeline to checkout the pipeline and groovy functions.
+// It is needed to be hard coded on pipeline, to enable each job to take its value of the branch,
+// otherwise - value is deleted / get hte same value from the pipeline code each time it runs.
+// example: refs/heads/build-pipeline-into-scm
+// If you work on a fork, also set the RELENG_REPO with your fork such as git@github.com:hagitsegev/scylla-pkg or
+// use the default repo of git@github.com:scylladb/scylla-pkg or git@github.com:scylladb/scylla-enterprise-pkg
+
+
+Map modules = [:]
+pipeline {
+	parameters {
+		// Mandatory:
+		string(name: 'X86_NODE_PARAM', defaultValue: 'packager', description: 'On which node to run.')
+		string(name: 'ARM_NODE_PARAM', defaultValue: 'armv8', description: 'Node or label to test installation on arm. Use "NONE" to skip. Useful options: armv8')
+
+		// Optional
+		string(name: 'ARTIFACT_SOURCE_JOB_NAME', defaultValue: '', description: 'Build path to take artifacts from (usually next or build). Use this with ARTIFACT_SOURCE_BUILD_NUM to get reloc from jenkins, or ARTIFACT_WEB_URL to take them from cloud.')
+		string(name: 'ARTIFACT_SOURCE_BUILD_NUM', defaultValue: '', description: 'Build number to take artifacts from. Leave empty to use last available build. Use with ARTIFACT_SOURCE_JOB_NAME to take artifacts from Jenkins, or ARTIFACT_WEB_URL to take them from cloud.')
+		string(name: 'ARTIFACT_WEB_URL', defaultValue: 'latest', description: 'URL to take reloc items from. Use when reloc is not available on jenkins, or when running on AWS, which will download faster from S3.')
+		string(name: 'RELENG_REPO', defaultValue: '', description: 'Branch of pkg repo or fork. If empty - will take scylla-pkg repo (examples: git@github.com:scylladb/scylla-pkg, git@github.com:scylladb/scylla-enterprise-pkg, git@github.com:hagitsegev/scylla-pkg)')
+		string(name: 'RELENG_BRANCH', defaultValue: '', description: 'Branch of pkg repo. If empty - will take master branch (master, branch-3.1)')
+		string(name: 'SCYLLA_BRANCH', defaultValue: '', description: 'Branch for Scylla. If empty - will take stable branch (master)')
+		string(name: 'MACHINE_IMAGE_BRANCH', defaultValue: '', description: 'Branch for ami. If empty - will take stable branch (master)')
+		booleanParam(name: 'BUILD_DEBUG', defaultValue: true, description: 'Set to create also debug deb packages')
+		booleanParam(name: 'INSTALLATION_TEST_FAIL_BUILD', defaultValue: true, description: 'Unset not to faile build if installation tests fail')
+		booleanParam(name: 'X86_SKIP_INSTALL_TEST', defaultValue: false, description: 'Set to skip installation tests on X86 - for debug use')
+		booleanParam(name: 'ARM_SKIP_INSTALL_TEST', defaultValue: false, description: 'Set to skip installation tests on X86 - for debug use')
+		booleanParam(name: 'SKIP_TEST', defaultValue: false, description: 'Set to skip tests - for debug use')
+		booleanParam(name: 'SKIP_ADDITIONAL_TESTS', defaultValue: false, description: 'Set to skip the additional tests (relevant when SKIP_TEST is not set) - for next-machine-image')
+		booleanParam(name: 'SKIP_PROMOTE_LATEST', defaultValue: false, description: 'Set to skip promote to latest - for debug use')
+		booleanParam(name: 'RUN_DOWNSTREAM_JOBS', defaultValue: true, description: 'Unset this to avoid calling downstream jobs')
+		booleanParam(name: 'DRY_RUN', defaultValue: false, description: 'Set to test the pipeline code')
+		booleanParam(name: 'SKIP_BUILD_ON_DEBUG', defaultValue: false, description: 'Set to use the last built packages and list. For debug only.')
+		booleanParam(name: 'PRESERVE_WORKSPACE', defaultValue: false, description: 'Set to avoid cleaning workspace before and after run, for debug needs')
+		booleanParam(name: 'DEBUG_MAIL', defaultValue: false, description: 'Set to send mails to requester only')
+	}
+
+	agent {
+		label {
+			label "built-in"
+		}
+	}
+
+	environment {
+		AWS_ACCESS_KEY_ID     = credentials('jenkins2-aws-secret-key-id')
+		AWS_SECRET_ACCESS_KEY = credentials('jenkins2-aws-secret-access-key')
+	}
+
+	options {
+		disableConcurrentBuilds()
+		timeout(time: 6, unit: 'HOURS')
+		buildDiscarder(
+			logRotator(
+				numToKeepStr: '10',
+				daysToKeepStr: env.JOB_NAME.contains("releng-testing") ? '14': ''
+			)
+		)
+		copyArtifactPermission('*ami*,*release*,*gce*,*azure*,*docker*')
+	}
+
+	stages {
+		stage ('Prepare') {
+			steps {
+				script {
+					generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+					general = load "${generalProperties.groovyPath}/general.groovy"
+					general.initPipeline()
+
+					buildArm = params.ARM_NODE_PARAM != "NONE"
+					if (!armSupported) {
+						echo "Currently not supporting ARM on this release"
+						buildArm = false
+					}
+					if (buildArm) {
+						currentBuild.description = "X86 + ARM"
+						artifactSourceJob = params.ARTIFACT_SOURCE_JOB_NAME ?: "${branchProperties.calledBuildsDir}${branchProperties.buildJobName}"
+					} else {
+						currentBuild.description = "X86 only"
+						artifactSourceJob = params.ARTIFACT_SOURCE_JOB_NAME ?: "${branchProperties.calledBuildsDir}${branchProperties.relocUploaderJobName}"
+					}
+
+					justPrintErrors = (!params.INSTALLATION_TEST_FAIL_BUILD)
+					scyllaBranch = params.SCYLLA_BRANCH ?: branchProperties.stableBranchName
+					machineImageBranch = params.MACHINE_IMAGE_BRANCH ?: branchProperties.stableBranchName
+
+					(qaJobProvisionType, qaNodesPostBehaviorType) = jenkins.setQAJobParameters()
+					artifactSourceJobNum = params.ARTIFACT_SOURCE_BUILD_NUM ?: Jenkins.instance.getItemByFullName(artifactSourceJob).lastSuccessfulBuild.number.toString()
+					paramArtifactWebUrl = params.ARTIFACT_WEB_URL ?: "latest"
+					cloudUrl = artifact.getLastSuccessfulUrl (
+						artifactWebUrl: paramArtifactWebUrl,
+						artifactSourceJob: artifactSourceJob,
+						artifactSourceJobNum: artifactSourceJobNum,
+						fieldName: "rpm-deb-pack-url:"
+					)
+
+					relengTestingRun = jenkins.debugBuild()
+				}
+			}
+		}
+		stage('Checkout') {
+			steps {
+				script {
+					git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+					git.checkoutToDir (relengRepo, relengBranch, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+					scyllaUrlID = artifact.fetchMetadataValue (
+						downloadFromCloud: false,
+						artifactSourceJob: artifactSourceJob,
+						artifactSourceJobNum: artifactSourceJobNum,
+						cloudUrl: cloudUrl,
+						fieldName: "url-id:"
+					)
+					releaseShaId = artifact.fetchMetadataValue (
+						downloadFromCloud: false,
+						artifactSourceJob: artifactSourceJob,
+						artifactSourceJobNum: artifactSourceJobNum,
+						cloudUrl: cloudUrl,
+						fieldName: "scylla-release:"
+					)
+					if (params.SKIP_BUILD_ON_DEBUG) {
+						scyllaUnifiedDebUrl = "${branchProperties.scyllaDownloadsDebianUnstablePath}/$scyllaUrlID/"
+					} else {
+						scyllaUnifiedDebUrl = general.setTestingUrlIfNeeded ("${branchProperties.scyllaDownloadsDebianUnstablePath}/$scyllaUrlID/")
+					}
+
+					scyllaListUrl = "http://${scyllaUnifiedDebUrl}${branchProperties.scyllaUnifiedPkgRepo}/${branchProperties.listFileName}"
+					scyllaListDebugUrl = "http://${scyllaUnifiedDebUrl}${branchProperties.scyllaDebugUnifiedPkgRepo}/${branchProperties.debugListFileName}"
+					artifact.addLineToBuildMetadataFile("unified-deb-url", scyllaUnifiedDebUrl)
+					stash(name: generalProperties.buildMetadataFile, includes: generalProperties.buildMetadataFile)
+				}
+			}
+		}
+
+		stage('Create Repo') {
+			when {
+				expression { !(relengTestingRun && params.SKIP_BUILD_ON_DEBUG) }
+			}
+			steps {
+				script {
+					node(params.X86_NODE_PARAM) {
+						withCredentials([
+							file(credentialsId: 'scylladb-package-signing-key-2020', variable: 'SCYLLA_GPG_PRIVATE_KEY'),
+							file(credentialsId: 'scylladb-package-signing-key-2020-public', variable: 'SCYLLA_GPG_PUBLIC_KEY'),
+							string(credentialsId: 'scylladb-package-signing-key-2020-public-keyid', variable: 'SCYLLA_GPG_KEYID')
+						]) {
+							git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+							git.checkoutToDir (relengRepo, relengBranch, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+							git.checkoutToDir(gitProperties.scyllaRepoUrl, scyllaBranch, gitProperties.scyllaCheckoutDir)
+							git.checkoutToDir(gitProperties.scyllaMachineImageRepoUrl, machineImageBranch, gitProperties.scyllaMachineImageCheckoutDir)
+							unstash(name: generalProperties.buildMetadataFile)
+
+							build.prepareBuildDebPkg (
+								dryRun: params.DRY_RUN,
+								mainMode: true,
+								downloadFromCloud: true,
+								cloudUrl: cloudUrl,
+								artifactSourceJob: artifactSourceJob,
+								artifactSourceJobNum: artifactSourceJobNum,
+								scyllaUrlID: scyllaUrlID,
+								scyllaUnifiedDebUrl: scyllaUnifiedDebUrl,
+								buildMode: "release",
+								buildArm: buildArm,
+							)
+							if (params.BUILD_DEBUG) {
+								build.prepareBuildDebPkg (
+									dryRun: params.DRY_RUN,
+									mainMode: false,
+									downloadFromCloud: true,
+									cloudUrl: cloudUrl,
+									artifactSourceJob: artifactSourceJob,
+									artifactSourceJobNum: artifactSourceJobNum,
+									scyllaUrlID: scyllaUrlID,
+									scyllaUnifiedDebUrl: scyllaUnifiedDebUrl,
+									buildMode: "debug",
+									buildArm: buildArm,
+								)
+							}
+							git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+						}
+					}
+				}
+			}
+		}
+
+		stage('Install X86 Repo') {
+			when {
+				expression {! params.X86_SKIP_INSTALL_TEST}
+			}
+			steps {
+				script {
+					node(params.X86_NODE_PARAM) {
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+						git.checkoutToDir (relengRepo, relengBranch, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+						install.parallelTestScyllaVersion (
+							dryRun: params.DRY_RUN,
+							oses2Test: branchProperties.supportedUnifiedOsToTest,
+							scyllaExpectedRelease: branchProperties.devReleaseName,
+							scyllaExpectedVersionId: releaseShaId,
+							scyllaExpectedMode: "release",
+							scyllaRepoOrListUrl: scyllaListUrl,
+							logFileWord: "x86",
+							justPrintErrors: justPrintErrors,
+						)
+
+						if (params.BUILD_DEBUG) {
+							install.parallelTestScyllaVersion (
+								dryRun: params.DRY_RUN,
+								oses2Test: branchProperties.supportedUnifiedOsToTest,
+								scyllaExpectedRelease: branchProperties.devReleaseName,
+								scyllaExpectedVersionId: releaseShaId,
+								scyllaExpectedMode: "debug",
+								scyllaRepoOrListUrl: scyllaListDebugUrl,
+								logFileWord: "x86",
+								justPrintErrors: true,
+							)
+						}
+
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+					}
+				}
+			}
+		}
+
+		stage('Install ARM Repo') {
+			when {
+				expression {buildArm && ! params.ARM_SKIP_INSTALL_TEST}
+			}
+			steps {
+				node(params.ARM_NODE_PARAM) {
+					script {
+						cleanRootFiles = false // sudo does not work on arm, and as does not use docker - no need to clean root files
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+						git.checkoutToDir (relengRepo, relengBranch, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+						install.parallelTestScyllaVersion (
+							dryRun: params.DRY_RUN,
+							oses2Test: branchProperties.armSupportedUnifiedOsToTest,
+							scyllaExpectedRelease: branchProperties.devReleaseName,
+							scyllaExpectedVersionId: releaseShaId,
+							scyllaExpectedMode: "release",
+							scyllaRepoOrListUrl: scyllaListUrl,
+							logFileWord: "arm",
+							justPrintErrors: justPrintErrors,
+						)
+
+						if (params.BUILD_DEBUG) {
+							install.parallelTestScyllaVersion (
+								dryRun: params.DRY_RUN,
+								oses2Test: branchProperties.armSupportedUnifiedOsToTest,
+								scyllaExpectedRelease: branchProperties.devReleaseName,
+								scyllaExpectedVersionId: releaseShaId,
+								scyllaExpectedMode: "debug",
+								scyllaRepoOrListUrl: scyllaListDebugUrl,
+								logFileWord: "arm",
+								justPrintErrors: true,
+							)
+						}
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+					}
+				}
+			}
+		}
+
+		stage('Call Ubuntu 20.04 Test') {
+			when {
+				expression {! params.SKIP_TEST}
+			}
+			steps {
+				script {
+					jenkins.runTestJob (
+						dryRun: params.DRY_RUN,
+						failIfCallFailed: true,
+						waitForLongBuilds: true,
+						runJobsSerial: true,
+						calledBuildsDir: calledBuildsDir,
+						testsToRun: branchProperties.qaMadatoryArtifactsCalledByUnifiedDebBuild,
+						qaJobProvisionType: qaJobProvisionType,
+						qaNodesPostBehaviorType: qaNodesPostBehaviorType,
+						urlParamName: "scylla_repo",
+						urlParamValue: scyllaListUrl,
+					)
+				}
+			}
+		}
+
+		stage ('Promote to latest') {
+			when {
+				expression {!params.SKIP_PROMOTE_LATEST}
+			}
+			steps {
+				script {
+					node(params.X86_NODE_PARAM) {
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+						git.checkoutToDir (relengRepo, relengBranch, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+
+						artifact.promoteNightlyLatest(params.DRY_RUN, scyllaUnifiedDebUrl)
+
+						install.parallelTestScyllaVersion (
+							dryRun: params.DRY_RUN,
+							oses2Test: branchProperties.supportedUnifiedOsToTest,
+							testGetScylladb: true,
+							scyllaExpectedRelease: branchProperties.devReleaseName,
+							scyllaExpectedVersionId: releaseShaId,
+							scyllaExpectedMode: "release",
+							scyllaRepoOrListUrl: "nightly-$branchProperties.releaseName",
+							logFileWord: "latest-test-get-scylladb",
+							productName: branchProperties.productName,
+							justPrintErrors: justPrintErrors,
+						)
+
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+					}
+				}
+			}
+		}
+
+		stage ('Trigger Downstream Jobs') {
+			when {
+				expression {params.RUN_DOWNSTREAM_JOBS}
+			}
+			steps {
+				script {
+					jenkins.runBuilds(dryRun: params.DRY_RUN,
+						waitForLongBuilds: false,
+						failIfCallFailed: false,
+						buildShouldCallDependentJobs: true,
+						buildsToRun: branchProperties.machineImageJobs,
+						scyllaBranch: scyllaBranch,
+						artifactSourceJob: JOB_NAME,
+						relengRepo: relengRepo,
+						relengBranch: relengBranch,
+						calledBuildsDir: calledBuildsDir,
+						artifactSourceJobNum: env.BUILD_NUMBER,
+						osDistro: "ubuntu:20.04",
+					)
+
+					if (branchProperties.enableRollingUpgrade.toBoolean()) {
+						if (params.DRY_RUN) {
+							echo "Skipping Rolling upgrade as we dry-run"
+						} else {
+							test.runRollingUpgradeJobs (
+								rollingUpgradeList: branchProperties.unifiedDebRollingUpgradeList,
+								calledBuildsDir: calledBuildsDir,
+								scyllaRepoUrl: scyllaListUrl,
+								qaJobProvisionType: qaJobProvisionType,
+								qaNodesPostBehaviorType: qaNodesPostBehaviorType,
+							)
+						}
+					} else {
+						echo "By default rolling upgrade should not run on master, Skipping"
+					}
+				}
+			}
+		}
+
+		stage('Call Tests') {
+			when {
+				expression {! params.SKIP_TEST && ! params.SKIP_ADDITIONAL_TESTS}
+			}
+			steps {
+				script {
+					jenkins.runTestJob (
+						dryRun: params.DRY_RUN,
+						failIfCallFailed: true,
+						waitForLongBuilds: true,
+						runJobsSerial: true,
+						calledBuildsDir: calledBuildsDir,
+						testsToRun: branchProperties.qaArtifactsCalledByUnifiedDebBuild,
+						qaJobProvisionType: qaJobProvisionType,
+						qaNodesPostBehaviorType: qaNodesPostBehaviorType,
+						urlParamName: "scylla_repo",
+						urlParamValue: scyllaListUrl,
+					)
+				}
+			}
+		}
+	}
+
+	post {
+		//Order is: always, changed, fixed, regression, aborted, failure, success, unstable, and cleanup.
+		always {
+			script {
+				if (binding.hasVariable('initPipelineDone')) {
+					jenkins.setUnstableAsError(jobTitle)
+					mail.mailIfError("$devAddress", "${currentBuild.currentResult}: $jobTitle", "${currentBuild.currentResult}: ${jobTitle}: $logText")
+					git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+				} else if (!(JOB_NAME.contains("releng-testing") || params.DRY_RUN || params.DEBUG_MAIL)) {
+					mail (
+						to: "releng@scylladb.com",
+						subject: "${currentBuild.currentResult}: ${env.JOB_NAME} [${env.BUILD_NUMBER}]",
+						body: "${env.JOB_NAME} [${env.BUILD_NUMBER}] ${currentBuild.currentResult} at the very beginning. Please see Jenkins logs for details"
+					)
+					cleanWs()
+				} else {
+					cleanWs()
+				}
+			}
+		}
+
+		fixed {
+			script {
+				mail.mailFixed("$devAddress", "Fixed ${currentBuild.currentResult}: $jobTitle", "Fixed ${currentBuild.currentResult}: $jobTitle: $logText")
+			}
+		}
+	}
+}

@@ -1,0 +1,221 @@
+#!groovy
+// Pipeline build-arm
+// In order to debug, set RELENG_BRANCH and RELENG_REPO on Jenkins job with value of the debug branch.
+// example: refs/heads/build-pipeline-into-scm
+// If you work on a fork, also set the RELENG_REPO with your fork such as git@github.com:hagitsegev/scylla-pkg or
+// use the default repo of git@github.com:scylladb/scylla-pkg or git@github.com:scylladb/scylla-enterprise-pkg
+
+Map modules = [:]
+pipeline {
+	parameters {
+		// Mandatory
+		string(name: 'NODE_PARAM', defaultValue: 'armv8', description: 'Useful options: armatrading')
+
+		// Optional
+		string(name: 'TIMEOUT_PARAM', defaultValue: '6', description: 'Build timeout (Timeout in hours)')
+		string(name: 'NUM_OF_UNITTEST_REPEATS', defaultValue: '1', description: 'Define the number of repeats for each test in unittests. Use 0 to skip running the tests altogether.')
+		string(name: 'INCLUDE_TESTS', defaultValue: '' , description: 'Specify which tests to run. Leave empty for all. example: database_test')
+		string(name: 'SCYLLA_BRANCH', defaultValue: '', description: 'Branch for Scylla. If empty - will take stable branch (master)')
+		string(name: 'RELENG_REPO', defaultValue: '', description: 'Branch of pkg repo or fork. If empty - will take scylla-pkg repo (examples: git@github.com:scylladb/scylla-pkg, git@github.com:scylladb/scylla-enterprise-pkg, git@github.com:hagitsegev/scylla-pkg)')
+		string(name: 'RELENG_BRANCH', defaultValue: '', description: 'Branch of pkg repo. If empty - will take stable branch (master)')
+		booleanParam(name: 'PUBLISH_EVEN_ON_DEBUG', defaultValue: false, description: 'Check this to skip upload artifacts. Relevant only when debug pkg branch is used')
+		booleanParam(name: 'PRESERVE_WORKSPACE', defaultValue: false, description: 'Check this if you need the workspace to remain (for debug)')
+		booleanParam(name: 'DEBUG_MAIL', defaultValue: false, description: 'Uncheck if you want mail to rnd-int. Default is to sent to build requester only (you).')
+		booleanParam(name: 'DRY_RUN', defaultValue: false, description: 'Check this to check pipeline syntax. will not perform anything.')
+	}
+	agent {
+		label {
+			label env.NODE_PARAM
+		}
+	}
+
+	environment {
+		AWS_ACCESS_KEY_ID      = credentials('jenkins2-aws-secret-key-id')
+		AWS_SECRET_ACCESS_KEY  = credentials('jenkins2-aws-secret-access-key')
+	}
+	options {
+		disableConcurrentBuilds()
+		timeout(time: env.TIMEOUT_PARAM, unit: 'HOURS')
+		buildDiscarder(
+			logRotator(
+				numToKeepStr: '10',
+				daysToKeepStr: env.JOB_NAME.contains("releng-testing") ? '14': ''
+			)
+		)
+		copyArtifactPermission('*release*')
+	}
+
+	stages {
+		stage ('Prepare') {
+			steps {
+				script {
+					generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+					general = load "${generalProperties.groovyPath}/general.groovy"
+					general.initPipeline()
+
+					allTestResultDetails = ""
+					relengTestingRun = jenkins.debugBuild()
+					publishArtifacts = true
+					if (relengTestingRun && !params.PUBLISH_EVEN_ON_DEBUG) {
+						publishArtifacts = false
+					}
+					buildPassed = false
+					testFailed = false
+
+					buildTestModesList = general.buildModesList("") // test all: release, debug, dev
+					buildTestModesString = buildTestModesList.join(", ")
+					(utcTextTimeStamp, urlId) = artifact.cloudBuildIdPath ()
+					targetRelocUrl = general.setTestingUrlIfNeeded ("${branchProperties.relocPackageCloudPathPrefix}/$urlId/aarch64")
+					targetBuildPackagesUrl = general.setTestingUrlIfNeeded ("${branchProperties.buildPackagesCloudPathPrefix}/$urlId/aarch64")
+				}
+			}
+		}
+
+		stage('Checkout') {
+			steps {
+				script {
+					scyllaBranch    = params.SCYLLA_BRANCH ?: branchProperties.stableBranchName
+
+					lastStage = env.STAGE_NAME
+					git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+
+					scyllaSha = git.checkoutToDir(gitProperties.scyllaRepoUrl, scyllaBranch, gitProperties.scyllaCheckoutDir)
+
+					git.checkoutToDir(relengRepo, relengBranch, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+					general.lsPath (WORKSPACE, "Workspace content after check-outs")
+				}
+			}
+		}
+
+		stage('Build') {
+			steps {
+				script {
+					lastStage = env.STAGE_NAME
+
+					build.scyllaDistBuild (
+						debugInfoFlag: false,
+						testsDebugInfoFlag: false,
+						dryRun: params.DRY_RUN,
+						architecture: "aarch64",
+					)
+
+					(scyllaId, scyllaVersion) = build.createDistBuildMetadataFile (
+						dryRun: params.DRY_RUN,
+						scyllaSha: scyllaSha,
+						urlId: urlId,
+						buildMode: buildTestModesString,
+						utcTextTimeStamp: utcTextTimeStamp,
+						baseRelocCloudStorageUrl: targetRelocUrl,
+						baseBuildPackagesCloudStorageUrl: targetBuildPackagesUrl,
+					)
+					artifact.publishMetadataFile()
+					buildPassed = true
+				}
+			}
+		}
+
+		stage('Test') {
+			when {
+				expression { params.NUM_OF_UNITTEST_REPEATS != "0" }
+			}
+			steps {
+				script {
+					lastStage = env.STAGE_NAME
+					int numberOfTestFails = 0
+					int numberOfFailingModes = 0
+					String failedTestModes = ""
+					int numberOfTestedModes = 0
+
+					buildTestModesList.each { testMode ->
+						boolean modeTestsFailed = false
+						int numberOfModeTestFails = 0
+						String testResultSummary = ""
+						String modeTestResultDetails = ""
+
+						numberOfTestedModes ++
+						try {
+							(modeTestsFailed, numberOfModeTestFails, testResultSummary, modeTestResultDetails) = test.doTest (
+								dryRun: params.DRY_RUN,
+								testMode: testMode,
+								includeTests: params.INCLUDE_TESTS,
+								numOfRepeats: params.NUM_OF_UNITTEST_REPEATS)
+
+						} catch (org.jenkinsci.plugins.workflow.steps.FlowInterruptedException interruptEx) {
+							currentBuild.result = 'ABORTED'
+							error ("Interrupt exception (abort) while Test phase, error: |$interruptEx|")
+						} finally {
+							if (currentBuild.currentResult == 'ABORTED') {
+								error ("Interrupt exception (abort) while Test phase")
+							} else if (modeTestsFailed) {
+								testFailed = true
+								numberOfTestFails = numberOfTestFails + numberOfModeTestFails
+								allTestResultDetails = "$allTestResultDetails\n$modeTestResultDetails"
+								numberOfFailingModes ++
+								if (!failedTestModes) {
+									failedTestModes = "Failed test modes: $testMode"
+								} else {
+									failedTestModes = "$failedTestModes, $testMode"
+								}
+							}
+						}
+					}
+					if (testFailed) {
+						test.isflakyUnittest (
+							dryRun: params.DRY_RUN,
+							testFailed: testFailed,
+							numberOfTestedModes: numberOfTestedModes,
+							numberOfTestFails: numberOfTestFails,
+							numberOfFailingModes: numberOfFailingModes,
+							allTestResultDetails: allTestResultDetails,
+							jobTitle: jobTitle,
+							devAddress: devAddress)
+
+						error (failedTestModes)
+					}
+				}
+			}
+		}
+	}
+
+	post {
+		//Order is: always, changed, fixed, regression, aborted, failure, success, unstable, and cleanup.
+		always {
+			script {
+				if (binding.hasVariable('initPipelineDone')) {
+					if (allTestResultDetails) {
+						logText += "\n$allTestResultDetails"
+					}
+					mail.mailIfError("$devAddress", "${currentBuild.currentResult} stage $lastStage: $jobTitle", "${currentBuild.currentResult}: $jobTitle on stage $lastStage: $logText")
+
+					if (buildPassed && publishArtifacts) {
+						boolean uploadGeneralModeArtifacts = true
+						buildTestModesList.each { buildMode ->
+							build.publishScyllaDistArtifacts (
+								dryRun: params.DRY_RUN,
+								scyllaRelocFullUrl: targetRelocUrl,
+								scyllaBuildPackagesFullUrl: targetBuildPackagesUrl,
+								buildMode: buildMode,
+								architecture: "aarch64",
+								uploadGeneralModeArtifacts: uploadGeneralModeArtifacts,
+							)
+							uploadGeneralModeArtifacts = false
+						}
+					}
+					git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+				} else if (!(JOB_NAME.contains("releng-testing") || params.DRY_RUN || params.DEBUG_MAIL)) {
+					mail (
+						to: "releng@scylladb.com",
+						subject: "${currentBuild.currentResult}: ${env.JOB_NAME} [${env.BUILD_NUMBER}]",
+						body: "${env.JOB_NAME} [${env.BUILD_NUMBER}] ${currentBuild.currentResult} at the very beginning. Please see Jenkins logs for details"
+					)
+				}
+			}
+		}
+
+		fixed {
+			script {
+				mail.mailFixed("$devAddress", "Fixed ${currentBuild.currentResult}: $jobTitle", "Fixed ${currentBuild.currentResult}: $jobTitle: $logText")
+			}
+		}
+	}
+}

@@ -1,0 +1,272 @@
+#!groovy
+// Pipeline docker
+// In order to debug, set RELENG_BRANCH on Jenkins job with value of the debug branch.
+// example: refs/heads/build-pipeline-into-scm
+// If you work on a fork, also set the RELENG_REPO with your fork such as git@github.com:hagitsegev/scylla-pkg or
+// use the default repo of git@github.com:scylladb/scylla-pkg or git@github.com:scylladb/scylla-enterprise-pkg
+
+Map modules = [:]
+pipeline {
+
+	parameters {
+		// Mandatory:
+		string(name: 'X86_NODE_PARAM', defaultValue: 'packager', description: 'On which node to test and publish docker.')
+		string(name: 'ARM_NODE_PARAM', defaultValue: 'armv8', description: 'Node or label to test installation on arm. Use "NONE" to skip. Useful options: armv8')
+
+		// Optional
+		string(name: 'ARTIFACT_SOURCE_JOB_NAME', defaultValue: '', description: 'Build path to take artifacts from (usually build or next). Use with ARTIFACT_SOURCE_BUILD_NUM to take artifacts from Jenkins, or ARTIFACT_WEB_URL to take them from cloud.')
+		string(name: 'ARTIFACT_SOURCE_BUILD_NUM', defaultValue: '', description: 'Build number to take artifacts from. Leave empty to use last available build. Use with ARTIFACT_SOURCE_JOB_NAME to take artifacts from Jenkins, or ARTIFACT_WEB_URL to take them from cloud.')
+		string(name: 'ARTIFACT_WEB_URL', defaultValue: 'latest', description: 'URL of RPMs created by centos. Use when not available on jenkins, or when running on AWS, which will download faster from S3.')
+		string(name: 'RELENG_REPO', defaultValue: '', description: 'Branch of pkg repo or fork. If empty - will take scylla-pkg repo (examples: git@github.com:scylladb/scylla-pkg, git@github.com:scylladb/scylla-enterprise-pkg, git@github.com:hagitsegev/scylla-pkg)')
+		string(name: 'RELENG_BRANCH', defaultValue: '', description: 'From where to run the package script and pipeline. Leave empty for the default stable branch (master)')
+		booleanParam(name: 'DRY_RUN', defaultValue: false, description: 'Set to test the pipeline code')
+		booleanParam(name: 'RUN_DOWNSTREAM_JOBS', defaultValue: true, description: 'Unset this to avoid calling downstream jobs - run only this build')
+		booleanParam(name: 'PRESERVE_WORKSPACE', defaultValue: false, description: 'Set to avoid cleaning workspace, for debug needs. If you do so - pay attention to the NODE_PARAM.')
+		booleanParam(name: 'SKIP_TEST', defaultValue: false, description: 'Set to skip docker test - for debug use')
+		booleanParam(name: 'SKIP_LATEST_PROMOTION', defaultValue: false, description: 'Set to skip docker latest promotion - for debug use')
+		booleanParam(name: 'DEBUG_MAIL', defaultValue: false, description: 'Uncheck if you want mail to rnd-int. Default is to sent to build requester only (you).')
+}
+	agent {
+		label {
+			label "built-in"
+		}
+	}
+
+	options {
+		disableConcurrentBuilds()
+		timeout(time: 4, unit: 'HOURS') // Long as we wait for docker test, and it might be long time in queue for munnin
+		buildDiscarder(
+			logRotator(
+				numToKeepStr: '10',
+				daysToKeepStr: env.JOB_NAME.contains("releng-testing") ? '14': ''
+			)
+		)
+		copyArtifactPermission('*release*')
+	}
+
+	stages {
+		stage ('Prepare') {
+			environment {
+				AWS_ACCESS_KEY_ID     = credentials('jenkins2-aws-secret-key-id')
+				AWS_SECRET_ACCESS_KEY = credentials('jenkins2-aws-secret-access-key')
+			}
+			steps {
+				script {
+					generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+					general = load "${generalProperties.groovyPath}/general.groovy"
+					general.initPipeline()
+					testArm = params.ARM_NODE_PARAM != "NONE"
+					if (!armSupported) {
+						echo "Currently not supporting ARM on this release"
+						testArm = false
+					}
+
+					dockerReleaseName = branchProperties.dockerReleaseName
+					artifactSourceJob = params.ARTIFACT_SOURCE_JOB_NAME ?: "${branchProperties.calledBuildsDir}${branchProperties.buildJobName}"
+					artifactSourceJobNum = params.ARTIFACT_SOURCE_BUILD_NUM ?: Jenkins.instance.getItemByFullName(artifactSourceJob).lastSuccessfulBuild.number.toString()
+					git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+					paramArtifactWebUrl = params.ARTIFACT_WEB_URL ?: "latest"
+					cloudUrl = artifact.getLastSuccessfulUrl (
+						artifactWebUrl: paramArtifactWebUrl,
+						artifactSourceJob: artifactSourceJob,
+						artifactSourceJobNum: artifactSourceJobNum,
+						fieldName: "reloc-pack-url:"
+					)
+
+					containerImageName = artifact.fetchMetadataValue (
+						downloadFromCloud: true,
+						cloudUrl: cloudUrl,
+						fieldName: "docker-image-name:"
+					)
+					(containerRepositoryFromMetadata, containerTagName) = containerImageName.tokenize( ':' )
+
+					scyllaRelease = artifact.fetchMetadataValue (
+						downloadFromCloud: true,
+						cloudUrl: cloudUrl,
+						fieldName: "scylla-release:"
+					)
+
+					publishStatus = artifact.publishArtifactsStatus(generalProperties.buildMetadataFile, WORKSPACE)
+					if (publishStatus) {
+						error ("Could not publish metadata file")
+					}
+					containerOrganizationRepository = "${generalProperties.containerOrganization}/${branchProperties.containerRepository}"
+					containerOrganizationImageName = "${generalProperties.containerOrganization}/$containerImageName"
+					containerImageLatest = "${containerOrganizationRepository}:$dockerReleaseName"
+
+					skipLatestPromotion = params.SKIP_LATEST_PROMOTION || params.SKIP_TEST
+
+					publishDockerParams =  " --release_name=$dockerReleaseName"
+					publishDockerParams += " --container-tag-name=$containerTagName"
+					publishDockerParams += " --origin_container_repo=${containerRepositoryFromMetadata}"
+					publishDockerParams += " --target_container_repo=${branchProperties.containerRepository}"
+					if (params.DRY_RUN) {
+						publishDockerParams += " --dry_run"
+					}
+					(qaJobProvisionType, qaNodesPostBehaviorType) = jenkins.setQAJobParameters()
+				}
+			}
+		}
+
+		stage('X86 - Verify Version') {
+			steps {
+				script {
+					node(params.X86_NODE_PARAM) {
+						jenkins.checkAndTagAwsInstance(runningUserID)
+						echo "Agent Checkout"
+						echo "=============="
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+						//We need it to run publish-docker.sh script.
+						git.checkoutToDir(relengRepo, relengBranch, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+						agentShellScriptsDir = "$WORKSPACE/${gitProperties.scyllaPkgCheckoutDir}/${generalProperties.pipelinesShellPath}"
+
+						install.testDockerVersion (
+							dryRun: params.DRY_RUN,
+							containerOrganizationImageName: containerOrganizationImageName,
+							expectedVersionID: scyllaRelease,
+							expectedRelease: branchProperties.devReleaseName,
+						)
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+					}
+				}
+			}
+		}
+
+		stage('ARM - Verify Version') {
+			when {
+				expression {testArm}
+			}
+			steps {
+				node(params.ARM_NODE_PARAM) {
+					script {
+						jenkins.checkAndTagAwsInstance(runningUserID)
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+						// local pkg on packager
+						git.checkoutToDir (relengRepo, relengBranch, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+
+						install.testDockerVersion (
+							dryRun: params.DRY_RUN,
+							containerOrganizationImageName: containerOrganizationImageName,
+							expectedVersionID: scyllaRelease,
+							expectedRelease: branchProperties.devReleaseName,
+						)
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+					}
+				}
+			}
+		}
+
+		stage('Test Docker') {
+			when {
+				expression {! params.SKIP_TEST}
+			}
+			steps {
+				script {
+					if (params.DRY_RUN) {
+						echo "Skip docker test as this is a dry run build"
+						echo "Properties:"
+						echo "scylla_docker_image: $containerOrganizationRepository"
+						echo "scylla_version: $containerTagName"
+					} else {
+						def dockerArtifacts = "$calledBuildsDir${branchProperties.qaArtifactsCalledByDockerBuild}"
+						if (jenkins.jobEnabled(dockerArtifacts)) {
+							echo "Triggering Docker Artifact: |$dockerArtifacts|"
+							jobResults=build job: dockerArtifacts,
+							parameters: [
+								string(name: 'scylla_docker_image', value: containerOrganizationRepository),
+								string(name: 'scylla_version', value: containerTagName),
+								string(name: 'provision_type', value: qaJobProvisionType),
+								string(name: 'post_behavior_db_nodes', value: qaNodesPostBehaviorType),
+							],
+							propagate: true,
+							wait: true
+						}
+					}
+				}
+			}
+		}
+
+		stage('Promote Latest Nightly') {
+			steps {
+				script {
+					node(params.X86_NODE_PARAM) {
+						jenkins.checkAndTagAwsInstance(runningUserID)
+						if (skipLatestPromotion) {
+							echo "Skipping docker nightly promote, since either user reuqested or docker test was skipped or not running on latest centos"
+						} else {
+							echo "Agent Checkout for Promote"
+							echo "=========================="
+							git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+							//We need it to run publish-docker.sh script.
+							git.checkoutToDir(relengRepo, relengBranch, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+							agentShellScriptsDir = "$WORKSPACE/${gitProperties.scyllaPkgCheckoutDir}/${generalProperties.pipelinesShellPath}"
+							promoteLatestPublishDockerParams = "$publishDockerParams --promote_unstable"
+							build.publishDocker(
+								scriptsDir: agentShellScriptsDir,
+								defaultDir: "$WORKSPACE/${gitProperties.scyllaCheckoutDir}/dist/docker/redhat",
+								scriptParams: promoteLatestPublishDockerParams,
+								testingEnv: relengTestingRun,
+							)
+
+							install.testDockerVersion (
+								dryRun: params.DRY_RUN,
+								containerOrganizationImageName: containerImageLatest,
+								expectedVersionID: scyllaRelease,
+								expectedRelease: branchProperties.devReleaseName,
+							)
+							git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	post {
+		//Order is: always, changed, fixed, regression, aborted, failure, success, unstable, and cleanup.
+		always {
+			script {
+				if (binding.hasVariable('initPipelineDone')) {
+					mail.mailIfError("$devAddress", "${currentBuild.currentResult}: $jobTitle", "${currentBuild.currentResult}: ${jobTitle}: $logText")
+					git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+				} else if (!(JOB_NAME.contains("releng-testing") || params.DRY_RUN || params.DEBUG_MAIL)) {
+					mail (
+						to: "releng@scylladb.com",
+						subject: "${currentBuild.currentResult}: ${env.JOB_NAME} [${env.BUILD_NUMBER}]",
+						body: "${env.JOB_NAME} [${env.BUILD_NUMBER}] ${currentBuild.currentResult} at the very beginning. Please see Jenkins logs for details"
+					)
+					cleanWs()
+				} else {
+					cleanWs()
+				}
+			}
+		}
+
+		fixed {
+			script {
+				mail.mailFixed("$devAddress", "Fixed ${currentBuild.currentResult}: $jobTitle", "Fixed ${currentBuild.currentResult}: ${jobTitle}: $logText")
+			}
+		}
+
+		success {
+			script {
+				dockerBasedJobs = "$calledBuildsDir${branchProperties.dockerBasedJobs}"
+				if (params.RUN_DOWNSTREAM_JOBS) {
+					if (jenkins.jobEnabled(dockerBasedJobs)) {
+						echo "Going to call Docker Based Job: $dockerBasedJobs"
+						build job: dockerBasedJobs,
+						parameters: [
+							[$class: 'StringParameterValue', name: 'SCYLLA_DOCKER_VERSION', value: dockerReleaseName],
+							[$class: 'StringParameterValue', name: 'RELENG_BRANCH', value: relengBranch],
+							[$class: 'StringParameterValue', name: 'RELENG_REPO', value: relengRepo],
+							[$class: 'StringParameterValue', name: 'SCYLLA_DOCKER_IMAGE', value: containerOrganizationRepository],
+							[$class: 'BooleanParameterValue', name: 'DRY_RUN', value: params.DRY_RUN],
+						],
+						propagate: false,
+						wait: false
+					}
+				}
+			}
+		}
+	}
+}

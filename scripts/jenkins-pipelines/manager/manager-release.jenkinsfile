@@ -1,0 +1,112 @@
+pipeline {
+	parameters {
+		string(name: 'VERSION_ID', defaultValue: '', description: 'Release version ID, example 2.0.0, 3.1.rc1')
+		string(name: 'NODE', defaultValue: 'packager', description: 'On which node to run this job')
+		booleanParam(name: 'UPDATE_VERSION_FILE', defaultValue: false, description: 'Update version file with VERSION_ID value')
+		booleanParam(name: 'DRY_RUN', defaultValue: false)
+		booleanParam(name: 'DEBUG_MAIL', defaultValue: false, description: 'Send emails to the build requester only')
+	}
+	agent {
+		label {
+			label "${params.NODE}"
+		}
+	}
+	options {
+		disableConcurrentBuilds()
+		timeout(time: 30, unit: 'MINUTES')
+		buildDiscarder(
+			logRotator(
+				numToKeepStr: '10',
+				daysToKeepStr: env.JOB_NAME.contains("releng-testing") ? '14': ''
+			)
+		)
+	}
+	stages {
+		stage('Prepare') {
+			steps {
+				script {
+					useManager = true
+					disableSubmodules = true
+					newBranchName = "branch-${params.VERSION_ID}"
+					generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+					general = load "${generalProperties.groovyPath}/general.groovy"
+					release = load "${generalProperties.groovyPath}/release.groovy"
+					general.initPipeline(useManager)
+					managerRepo = gitProperties.scyllaManagerRepoUrl
+					managerBranch = branchProperties.stableBranchName
+					jenkins.checkAndTagAwsInstance(runningUserID)
+				}
+			}
+		}
+		stage('Checkout') {
+			steps {
+				script {
+					git.checkoutToDir(relengRepo, relengBranch, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+					git.checkoutToDir(managerRepo, managerBranch, gitProperties.scyllaManagerCheckoutDir)
+					git.configureUserMail(gitProperties.scyllaPkgCheckoutDir)
+					git.configureUserMail(gitProperties.scyllaManagerCheckoutDir)
+				}
+			}
+		}
+		stage('Update version') {
+			when {
+				expression { params.UPDATE_VERSION_FILE }
+			}
+			steps {
+				script {
+					echo "Update version '{params.VERSION_ID}' on scylla-manager repo"
+					release.updateVersionFile(
+						repoCheckoutDir: gitProperties.scyllaManagerCheckoutDir,
+						repoUrl: gitProperties.scyllaManagerRepoUrl,
+						dryRun: params.DRY_RUN,
+						versionId: params.VERSION_ID,
+						stableBranch: newBranchName,
+						versionFilePath: 'dist/Makefile',
+					)
+				}
+			}
+		}
+		stage('Build') {
+			steps {
+				script {
+					build job: 'manager-build',
+						parameters: [
+							booleanParam(name: 'DRY_RUN', value: params.DRY_RUN),
+							booleanParam(name: 'DEBUG_MAIL', value: params.DEBUG_MAIL)
+						],
+						propagate: true,
+						wait: true
+				}
+			}
+		}
+	}
+	post {
+		always {
+			script {
+				if (binding.hasVariable('initPipelineDone')) {
+					mail.mailIfError(
+						"${generalProperties.mgmtMail}",
+						"${currentBuild.currentResult}: $jobTitle",
+						"${currentBuild.currentResult}: ${jobTitle}: $logText"
+					)
+					git.cleanWorkSpaceUponRequest()
+				} else if (!(JOB_NAME.contains("releng-testing") || params.DRY_RUN || params.DEBUG_MAIL)) {
+					mail(
+						to: "$relengAddress",
+						subject: "${currentBuild.currentResult}: ${env.JOB_NAME} [${env.BUILD_NUMBER}]",
+						body: "${env.JOB_NAME} [${env.BUILD_NUMBER}] ${currentBuild.currentResult} at the very beginning. Please see Jenkins logs for details"
+					)
+				}
+			}
+		}
+
+		fixed {
+			script {
+				mail.mailFixed(
+					"$relengAddress",
+					"Fixed ${currentBuild.currentResult}: $jobTitle",
+					"Fixed ${currentBuild.currentResult}: ${jobTitle}: $logText")
+			}
+		}
+	}
+}

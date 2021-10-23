@@ -1,0 +1,299 @@
+#!groovy
+// Pipeline package-release
+// In order to debug, set RELENG_BRANCH on Jenkins job with value of the debug branch.
+// example: refs/heads/build-pipeline-into-scm
+// If you work on a fork, also set the RELENG_REPO with your fork such as git@github.com:hagitsegev/scylla-pkg or
+// use the default repo of git@github.com:scylladb/scylla-pkg or git@github.com:scylladb/scylla-enterprise-pkg
+
+
+Map modules = [:]
+pipeline {
+	parameters {
+		// Mandatory:
+		string(name: 'VERSION_ID', defaultValue: '', description: 'Name of the release. Examples: 3.0.5, 2018.1.13, 3.1.rc1')
+		string(name: 'LAST_TAG', defaultValue: 'scylla-XX', description: 'From which tag to start collect issues for release notes. Usually last release. Example: scylla-3.1.0')
+		string(name: 'NODE_PARAM', defaultValue: 'packager', description: 'On which node to run. Python script to create release notes does not work on dgccd201. Issue 274')
+
+		// Optional
+		string(name: 'RELENG_REPO', defaultValue: '', description: 'Branch of pkg repo or fork. If empty - will take scylla-pkg repo (examples: git@github.com:scylladb/scylla-pkg, git@github.com:scylladb/scylla-enterprise-pkg, git@github.com:hagitsegev/scylla-pkg)')
+		string(name: 'RELENG_BRANCH', defaultValue: '', description: 'From where to run the package script and pipeline.')
+		booleanParam(name: 'DRY_RUN', defaultValue: false, description: 'Set to test the pipeline code')
+		booleanParam(name: 'PRESERVE_WORKSPACE_AFTER', defaultValue: false, description: 'Set to avoid cleaning workspace, for debug needs')
+		booleanParam(name: 'DEBUG_MAIL', defaultValue: false, description: 'Set to send mails to requester only')
+
+		// Parameters to enable skipping some parts:
+		booleanParam(name: 'UPDATE_VERSION_FILES', defaultValue: true, description: 'Uncheck this if you want to add content to a release that was already started. This will skip version update.')
+		booleanParam(name: 'UPDATE_MACHINE_IMAGE_VERSION_ONLY', defaultValue: false, description: 'Check this if scylla version was updated, but machine-image update failed. This will skip version update on Scylla.')
+		booleanParam(name: 'UPLOAD_METADATA', defaultValue: false, description: 'Mostly used on rc-0, but also when there is a need to fix metadata.')
+		booleanParam(name: 'SET_SCYLLA_PKG_REPOS', defaultValue: true, description: 'Uncheck this if scylla-pkg repos were already updated (rare end case)')
+		booleanParam(name: 'CREATE_RELEASE_NOTES', defaultValue: true, description: 'Uncheck this if release notes was already sent (rare end case)')
+		booleanParam(name: 'RUN_RELEASE_JOBS', defaultValue: true, description: 'Uncheck this if no need to run the release jobs.')
+		booleanParam(name: 'RUN_EVEN_IF_NEXT_IS_RUNNING', defaultValue: false, description: 'Skip verification of last commit on next and master. If checked - next run of next will fail to push (as this process pushes both to next and to branch)')
+	}
+
+	agent {
+		label {
+			label env.NODE_PARAM
+		}
+	}
+
+	options {
+		disableConcurrentBuilds()
+		timeout(time: 3, unit: 'HOURS') // Long, as this build waits for centos-rpm which takes ~2 hours.
+		buildDiscarder(logRotator(numToKeepStr: '10'))
+		copyArtifactPermission('*release*')
+	}
+
+
+	stages {
+
+		stage ('Prepare') {
+			steps {
+			   script {
+					generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+					// On debug run, this will be over-written later, on checkout phase
+					branchProperties = readProperties file: "scripts/jenkins-pipelines/branch-specific.properties"
+
+					jenkins = load "${generalProperties.groovyPath}/jenkins.groovy"
+					release = load "${generalProperties.groovyPath}/release.groovy"
+					(debugRun, versionId, releaseNameFromVersionId) = release.setVersionRelease (params.VERSION_ID, params.DRY_RUN)
+
+					lastTag = params.LAST_TAG
+					skipNextMasterVerification = params.RUN_EVEN_IF_NEXT_IS_RUNNING
+					if (lastTag == "scylla-XX") {
+						if (params.DRY_RUN || debugRun) {
+							echo "As this build runs on dry-run or releng job, and didn't get last tag, set it to default dry-run value."
+							lastTag = "scylla-${branchProperties.defaultDryRunBaseTag}"
+							skipNextMasterVerification = true
+						} else {
+							error ("When running build not on dry-run or releng job, you must give a value on LAST_TAG parameter")
+						}
+					}
+					isRcVersion = release.isRcVersion(versionId)
+
+					debugOrDryRun = debugRun || params.DRY_RUN
+					debugOrDryRunText = ""
+					if (debugOrDryRun) {
+						debugOrDryRunText = " (dry run or debug build)"
+					}
+
+					mail = load "${generalProperties.groovyPath}/mail.groovy"
+					git = load "${generalProperties.groovyPath}/git.groovy"
+					test = load "${generalProperties.groovyPath}/test.groovy"
+					general = load "${generalProperties.groovyPath}/general.groovy"
+					artifact = load "${generalProperties.groovyPath}/artifact.groovy"
+					calledBuildsDir = jenkins.prodOrDebugFolders(debugOrDryRun)
+					git.createGitProperties()
+					gitProperties = readProperties file: "${generalProperties.gitPropertiesFileName}"
+
+					(jobTitle,logText,runningUserID,devAddress,relengAddress,qaAddress)=mail.setMailParameters(
+						dryRun: debugOrDryRun,
+						debugMail: params.DEBUG_MAIL,
+						branch: versionId,
+						devAddress: generalProperties.releasePromotionMail,
+					)
+
+					release.errorIfTagIsIllegal(lastTag, gitProperties.scyllaRepoUrl)
+					release.errorIfBranchFormatIsIllegal(releaseNameFromVersionId, gitProperties.scyllaRepoUrl)
+					boolean debugMail = debugOrDryRun || params.DEBUG_MAIL
+					releaseNotesAddress = release.getReleaseNoteEmailAddresses (debugMail)
+					isOpenSourceRelease = release.isOpenSourceRelease(gitProperties.scyllaRepoUrl)
+					stableBranch = branchProperties.stableBranchName
+					gitRepoShaFilePath = "$WORKSPACE/${gitProperties.scyllaPkgCheckoutDir}/${generalProperties.gitRepoShaFileName}"
+					if (isOpenSourceRelease) {
+						productName = "scylla"
+					} else {
+						productName = "scylla-enterprise"
+					}
+					jenkins.checkAndTagAwsInstance(runningUserID)
+				}
+			}
+		}
+
+		stage('Checkout') {
+			steps {
+				script {
+					boolean preserveWorkspace=false // We always clean at the beginning as this is a release.
+					git.cleanWorkSpaceUponRequest(preserveWorkspace)
+					git.checkoutToDir (gitProperties.scyllaRepoUrl, stableBranch, gitProperties.scyllaCheckoutDir)
+					git.configureUserMail(gitProperties.scyllaCheckoutDir)
+
+					git.checkoutToDir (gitProperties.scyllaMachineImageRepoUrl, stableBranch, gitProperties.scyllaMachineImageCheckoutDir)
+					git.configureUserMail(gitProperties.scyllaMachineImageCheckoutDir)
+
+					git.updateGitSubmodules(gitProperties.scyllaPkgRepoUrl, stableBranch, gitProperties.scyllaPkgCheckoutDir)
+					git.configureUserMail(gitProperties.scyllaPkgCheckoutDir)
+
+					// I don't want to mix scripts repo (might be on debug mode) and prod repo, so I checkout twice.
+					// This is called Elvis operator. It give a default in case the property is null.
+					relengRepo = params.RELENG_REPO ?: gitProperties.scyllaPkgRepoUrl
+					relengBranch = params.RELENG_BRANCH ?: branchProperties.stableBranchName
+					boolean disableSubmodules = true
+					git.checkoutToDir (relengRepo, relengBranch, gitProperties.scyllaPkgScriptsCheckoutDir, disableSubmodules)
+					shellScriptsDir = "$WORKSPACE/${gitProperties.scyllaPkgScriptsCheckoutDir}/${generalProperties.pipelinesShellPath}"
+					// Override branch properties on debug run
+					release.setDebugProperties(debugRun)
+					general.lsPath (WORKSPACE, "Workspace content after check-outs")
+				}
+			}
+		}
+
+		stage('Update Version Files') {
+			when {
+				expression {params.UPDATE_VERSION_FILES}
+			}
+			steps {
+				script {
+					def reposDirUrl = [:]
+					if (!params.UPDATE_MACHINE_IMAGE_VERSION_ONLY) {
+						reposDirUrl.scylla =
+							[repoDir: gitProperties.scyllaCheckoutDir,
+							 repoUrl: gitProperties.scyllaRepoUrl]
+					}
+
+					reposDirUrl.machineImage =
+						[repoDir: gitProperties.scyllaMachineImageCheckoutDir,
+						 repoUrl: gitProperties.scyllaMachineImageRepoUrl]
+
+					reposDirUrl.each { key, val ->
+						echo "repo: |$key|, repoDir: |$val.repoDir|, repoUrl: |$val.repoUrl|"
+						release.updateVersionFile (
+							repoCheckoutDir: val.repoDir,
+							repoUrl: val.repoUrl,
+							dryRun: debugOrDryRun,
+							versionId: versionId,
+							nextBranch: branchProperties.nextBranchName,
+							stableBranch: stableBranch,
+							skipNextMasterVerification: skipNextMasterVerification,
+						)
+					}
+				}
+			}
+		}
+
+		stage('Upload Metadata') {
+			when {
+				expression {params.UPLOAD_METADATA}
+			}
+			environment {
+				AWS_ACCESS_KEY_ID      = credentials('jenkins2-aws-secret-key-id')
+				AWS_SECRET_ACCESS_KEY  = credentials('jenkins2-aws-secret-access-key')
+			}
+			steps {
+				script {
+					release.uploadMetaData (
+						pkgCheckoutDir: gitProperties.scyllaPkgScriptsCheckoutDir,
+						scriptsDir: shellScriptsDir,
+						dryRun: params.DRY_RUN,
+						releaseName: releaseNameFromVersionId,
+						productName: productName)
+				}
+			}
+		}
+
+		stage('Update PKG Repos') {
+			when {
+				expression {params.SET_SCYLLA_PKG_REPOS}
+			}
+			environment {
+				AWS_ACCESS_KEY_ID      = credentials('jenkins2-aws-secret-key-id')
+				AWS_SECRET_ACCESS_KEY  = credentials('jenkins2-aws-secret-access-key')
+			}
+			steps {
+				script {
+					release.setPkgRepos (gitProperties.scyllaPkgCheckoutDir, debugOrDryRun, versionId)
+				}
+			}
+		}
+
+		stage('Get SHAs') {
+			when {
+				expression {params.UPDATE_VERSION_FILES || params.SET_SCYLLA_PKG_REPOS || params.RUN_RELEASE_JOBS}
+			}
+			steps {
+				script {
+					git.createShaProperties (baseDir: "$WORKSPACE/${gitProperties.scyllaPkgCheckoutDir}",
+						shellScriptsDir: shellScriptsDir,
+						gitRepoShaFilePath: gitRepoShaFilePath,
+						branch: branchProperties.stableBranchName,
+						qaBranch: branchProperties.stableQABranchName,
+						qaRepoList: branchProperties.qaGitRepositories
+					)
+				}
+			}
+		}
+
+		stage('Release Notes') {
+			when {
+				expression {params.CREATE_RELEASE_NOTES}
+			}
+			environment {
+				GITHUB_ACCESS_TOKEN = credentials('backport-queue-github-access-token')
+			}
+			steps {
+				script {
+					release.genReleaseNotes (gitProperties.scyllaCheckoutDir, "$WORKSPACE/${gitProperties.scyllaPkgScriptsCheckoutDir}", versionId, lastTag)
+					publishStatus = artifact.publishArtifactsStatus(generalProperties.releaseNotesFile, WORKSPACE)
+					if (publishStatus && !debugOrDryRun){
+						error("Could not publish the release notes file")
+					}
+					def subject = "Release notes${debugOrDryRunText} for $versionId (Auto generated, needs review)"
+					def mailBody = subject
+					mail.mailWithFileOnBody (
+						address: releaseNotesAddress,
+						title: subject,
+						inputBody: mailBody,
+						attachFile: generalProperties.releaseNotesFile)
+				}
+			}
+		}
+
+		stage('Run Jobs') {
+			when {
+				expression {params.RUN_RELEASE_JOBS}
+			}
+			steps {
+				script {
+					if (debugOrDryRun) {
+						relengBranchForBuid = relengBranch
+					} else {
+						relengBranchForBuid = ""
+					}
+
+					jenkins.runBuilds(dryRun: debugOrDryRun,
+						waitForLongBuilds: true,
+						failIfCallFailed: true,
+						buildShouldCallDependentJobs: true,
+						buildsToRun: branchProperties.buildJobName,
+						relengRepo: relengRepo,
+						relengBranch: relengBranchForBuid,
+						calledBuildsDir: calledBuildsDir,
+						relocJobName: "NA",
+						x86TargetNode:generalProperties.x86TargetNextBuilder,
+						artifactSourceJobNum: env.BUILD_NUMBER)
+				}
+			}
+		}
+	}
+
+	post {
+		//Order is: always, changed, fixed, regression, aborted, failure, success, unstable, and cleanup.
+		always {
+			script {
+				if (binding.hasVariable('runningUserID')) {
+					mail.mailResults("$relengAddress", "$currentBuild.currentResult: $jobTitle", "Please follow up package jobs status on Jenkins")
+					git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE_AFTER)
+				} else if (!(JOB_NAME.contains("releng-testing") || params.DRY_RUN || params.DEBUG_MAIL)) {
+					mail (
+						to: "releng@scylladb.com",
+						subject: "${currentBuild.currentResult}: ${env.JOB_NAME} [${env.BUILD_NUMBER}]",
+						body: "${env.JOB_NAME} [${env.BUILD_NUMBER}] ${currentBuild.currentResult} at the very beginning. Please see Jenkins logs for details"
+					)
+					cleanWs()
+				} else {
+					cleanWs()
+				}
+			}
+		}
+	}
+}

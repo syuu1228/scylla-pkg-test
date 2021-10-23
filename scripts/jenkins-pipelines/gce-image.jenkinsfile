@@ -1,0 +1,264 @@
+#!groovy
+// Pipeline gce
+// In order to debug, set branch on Jenkins job pipeline section and /or parameter with value of the debug branch.
+// Parameter is used to run sh scripts, pipeline to checkout the pipeline and groovy functions.
+// It is needed to be hard coded on pipeline, to enable each job to take its value of the branch,
+// otherwise - value is deleted / get hte same value from the pipeline code each time it runs.
+// example: refs/heads/build-pipeline-into-scm
+// If you work on a fork, also set the RELENG_REPO with your fork such as git@github.com:hagitsegev/scylla-pkg or
+// use the default repo of git@github.com:scylladb/scylla-pkg or git@github.com:scylladb/scylla-enterprise-pkg
+
+
+Map modules = [:]
+pipeline {
+	parameters {
+		// Mandatory:
+		string(name: 'X86_NODE_PARAM', defaultValue: 'packager', description: 'On which node to run the gce image build. Useful options: packager,loki,dgccd201,thor,ran,huginn,muninn.')
+		string(name: 'MACHINE_IMAGE_REPO', defaultValue: '', description: 'Repo for machine-image. If empty - will take scylla repo')
+		string(name: 'SCYLLA_MACHINE_IMAGE_BRANCH', defaultValue: '', description: 'Branch of scylla-machine-image repofo. If empty - will take stable branch')
+		string(name: 'TEST_EXISTING_GCE_IMAGE_ID', defaultValue: '', description: 'GCE image ID to test. If empty - will build a new gce image')
+
+		// Optional
+		string(name: 'SCYLLA_RELEASE', defaultValue: '', description: 'The scylla release such as master, enterprise, scylla-3.1. If empty - will take stable branch of the release (master)')
+		string(name: 'ARTIFACT_SOURCE_JOB_NAME', defaultValue: '', description: 'Build path to take artifacts from (unified-deb). Use this with ARTIFACT_SOURCE_BUILD_NUM to get reloc from jenkins, or ARTIFACT_WEB_URL to take them from cloud.')
+		string(name: 'ARTIFACT_SOURCE_BUILD_NUM', defaultValue: '', description: 'Build number to take artifacts from. Leave empty to use last available build. Use with ARTIFACT_SOURCE_JOB_NAME to take artifacts from Jenkins, or ARTIFACT_WEB_URL to take them from cloud.')
+		string(name: 'ARTIFACT_WEB_URL', defaultValue: 'latest', description: 'URL of deb repo created by unified-deb processes. Use when not available on jenkins, or when running on AWS, which will download faster from S3.')
+		string(name: 'RELENG_REPO', defaultValue: '', description: 'Branch of pkg repo or fork. If empty - will take scylla-pkg repo (examples: git@github.com:scylladb/scylla-pkg, git@github.com:scylladb/scylla-enterprise-pkg, git@github.com:hagitsegev/scylla-pkg)')
+		string(name: 'RELENG_BRANCH', defaultValue: '', description: 'Branch of pkg repo. If empty - will take stable branch (master)')
+		booleanParam(name: 'SKIP_TEST', defaultValue: false, description: 'Set to skip gce image test - for debug use')
+		booleanParam(name: 'SKIP_ADDITIONAL_TESTS', defaultValue: false, description: 'Set to skip the additional tests (relevant when SKIP_TEST is not set) - for next-machine-image')
+		booleanParam(name: 'DRY_RUN', defaultValue: false, description: 'Set to test the pipeline code')
+		booleanParam(name: 'PRESERVE_WORKSPACE', defaultValue: false, description: 'Set to avoid cleaning workspace before and after run, for debug needs')
+		booleanParam(name: 'DEBUG_MAIL', defaultValue: false, description: 'Set to send mails to requester only')
+		booleanParam(name: 'RUN_DOWNSTREAM_JOBS', defaultValue: true, description: 'Unset this to avoid calling downstream jobs')
+	}
+
+	agent {
+		label {
+			label "built-in"
+		}
+	}
+
+	options {
+		disableConcurrentBuilds()
+		timeout(time: 360, unit: 'MINUTES')
+		buildDiscarder(
+			logRotator(
+				numToKeepStr: '10',
+				daysToKeepStr: env.JOB_NAME.contains("releng-testing") ? '14': ''
+			)
+		)
+		copyArtifactPermission('*release*')
+	}
+
+	stages {
+		stage ('Prepare') {
+			environment {
+				AWS_ACCESS_KEY_ID     = credentials('jenkins2-aws-secret-key-id')
+				AWS_SECRET_ACCESS_KEY = credentials('jenkins2-aws-secret-access-key')
+			}
+			steps {
+				script {
+					generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+					general = load "${generalProperties.groovyPath}/general.groovy"
+					general.initPipeline()
+
+					releaseName = params.SCYLLA_RELEASE ?: branchProperties.stableBranchName
+					machineImageRepo = params.MACHINE_IMAGE_REPO ?: gitProperties.scyllaMachineImageRepoUrl
+					machineImageBranch = params.SCYLLA_MACHINE_IMAGE_BRANCH ?: branchProperties.stableBranchName
+					artifactSourceJob = params.ARTIFACT_SOURCE_JOB_NAME ?: "${branchProperties.calledBuildsDir}${branchProperties.unifiedDebJobName}"
+					artifactSourceJobNum = params.ARTIFACT_SOURCE_BUILD_NUM ?: Jenkins.instance.getItemByFullName(artifactSourceJob).lastSuccessfulBuild.number.toString()
+					(qaJobProvisionType, qaNodesPostBehaviorType) = jenkins.setQAJobParameters()
+					paramArtifactWebUrl = params.ARTIFACT_WEB_URL ?: "latest"
+					cloudUrl = artifact.getLastSuccessfulUrl (
+						artifactWebUrl: paramArtifactWebUrl,
+						artifactSourceJob: artifactSourceJob,
+						artifactSourceJobNum: artifactSourceJobNum,
+						fieldName: "unified-deb-url:",
+					)
+					managerAgentRepoListUrl = branchProperties.ubuntuManagerAgentListUrl
+					baseUrl = "${cloudUrl}${branchProperties.scyllaUnifiedPkgRepo}/${branchProperties.listFileName}"
+
+					artifact.getArtifact(artifact: generalProperties.buildMetadataFile,
+						targetPath: WORKSPACE,
+						artifactSourceJob: artifactSourceJob,
+						artifactSourceJobNum: artifactSourceJobNum,
+						downloadFromCloud: true,
+						sourceUrl: cloudUrl,
+						ignoreMissingArtifact: false
+					)
+
+					releaseFromMetadata = artifact.fetchMetadataValue (
+						downloadFromCloud: true,
+						artifactSourceJob: artifactSourceJob,
+						artifactSourceJobNum:artifactSourceJobNum,
+						cloudUrl: cloudUrl,
+						fieldName: "scylla-release:"
+					)
+
+					versionFromMetadata = artifact.fetchMetadataValue (
+						downloadFromCloud: true,
+						artifactSourceJob: artifactSourceJob,
+						artifactSourceJobNum: artifactSourceJobNum,
+						cloudUrl: cloudUrl,
+						fieldName: "scylla-version:"
+					)
+
+					gceImageId = params.TEST_EXISTING_GCE_IMAGE_ID
+					buildNewGCE = true
+					if (params.TEST_EXISTING_GCE_IMAGE_ID) {
+						buildNewGCE = false
+					}
+					gceImageDbUrl = "$generalProperties.gceImageDbBaseUrl/$gceImageId"
+				}
+			}
+		}
+
+		stage('Build and test GCE image label') {
+			when {
+				expression {buildNewGCE}
+			}
+			steps {
+				script {
+					node(params.X86_NODE_PARAM) {
+						jenkins.checkAndTagAwsInstance(runningUserID)
+						echo "Checkout agent phase"
+						echo "===================="
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+						git.checkoutToDir(relengRepo, relengBranch, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+						git.checkoutToDir(machineImageRepo, machineImageBranch, gitProperties.scyllaMachineImageCheckoutDir)
+
+						echo "Build GCE image"
+						echo "==============="
+						gceImageId = build.buildGce(
+							dryRun: params.DRY_RUN,
+							baseUrl: baseUrl,
+						)
+						gceImageDbUrl = "$generalProperties.gceImageDbBaseUrl/$gceImageId"
+
+						echo "Test GCE installation version"
+						echo "============================="
+						install.testGceVersionLabel (
+							dryRun: params.DRY_RUN,
+							gceImageDbUrl: gceImageDbUrl,
+							dpackagerCommand: "$WORKSPACE/${gitProperties.scyllaPkgCheckoutDir}/${generalProperties.dpackagerPath}",
+							expectedVersionID: versionFromMetadata,
+							expectedRelease: releaseFromMetadata,
+						)
+					}
+				}
+			}
+		}
+
+		stage('Publish Metadata') {
+			steps {
+				script {
+					artifact.addLineToBuildMetadataFile("scylla-gce-image-id", gceImageId)
+					artifact.addLineToBuildMetadataFile("scylla-gce-image-db", gceImageDbUrl)
+					artifact.publishMetadataFile()
+				}
+			}
+
+		}
+
+		stage('GCE Image Base Instance Test') {
+			when {
+				expression {!params.SKIP_TEST && !params.DRY_RUN}
+			}
+			steps {
+				script {
+					test.runGceImageTests (
+						dryRun: params.DRY_RUN,
+						waitForLongBuilds: true,
+						failIfCallFailed: true,
+						calledBuildsDir: calledBuildsDir,
+						buildsToRun: branchProperties.qaArtifactsCalledByGceBuild,
+						qaJobProvisionType: qaJobProvisionType,
+						managerAgentRepoListUrl: managerAgentRepoListUrl,
+						qaNodesPostBehaviorType: qaNodesPostBehaviorType,
+						gceImageDbUrl: gceImageDbUrl,
+						instanceGceTypes: branchProperties.gceTestInstanceTypes,
+					)
+				}
+			}
+		}
+
+		stage('GCE Additional Instances Tests') {
+			when {
+				expression {(!(params.SKIP_TEST || params.SKIP_ADDITIONAL_TESTS)) && branchProperties.extendedGceTestInstanceTypes}
+			}
+			steps {
+				script {
+					if (! params.SKIP_ADDITIONAL_TESTS) {
+						test.runGceImageTests(
+							dryRun: params.DRY_RUN,
+							waitForLongBuilds: true,
+							failIfCallFailed: true,
+							calledBuildsDir: calledBuildsDir,
+							buildsToRun: branchProperties.qaArtifactsCalledByGceBuild,
+							qaJobProvisionType: qaJobProvisionType,
+							managerAgentRepoListUrl: managerAgentRepoListUrl,
+							qaNodesPostBehaviorType: qaNodesPostBehaviorType,
+							gceImageDbUrl: gceImageDbUrl,
+							instanceGceTypes: branchProperties.extendedGceTestInstanceTypes,
+						)
+					}
+				}
+			}
+		}
+	}
+
+	post {
+		//Order is: always, changed, fixed, regression, aborted, failure, success, unstable, and cleanup.
+		always {
+			script {
+				git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+				if (binding.hasVariable('initPipelineDone')) {
+					mail.mailIfError("${devAddress}", "${currentBuild.currentResult}: ${jobTitle}", "${currentBuild.currentResult}: ${jobTitle}: ${logText}")
+				} else if (!(JOB_NAME.contains("releng-testing") || params.DRY_RUN || params.DEBUG_MAIL)) {
+					mail (
+						to: "releng@scylladb.com",
+						subject: "${currentBuild.currentResult}: ${env.JOB_NAME} [${env.BUILD_NUMBER}]",
+						body: "${env.JOB_NAME} [${env.BUILD_NUMBER}] ${currentBuild.currentResult} at the very beginning. Please see Jenkins logs for details"
+					)
+					cleanWs()
+				} else {
+					cleanWs()
+				}
+			}
+		}
+
+		fixed {
+			script {
+				mail.mailFixed("${devAddress}", "Fixed ${currentBuild.currentResult}: ${jobTitle}", "Fixed ${currentBuild.currentResult}: ${jobTitle}: ${logText}")
+			}
+		}
+
+		success {
+			script {
+				if (params.DRY_RUN){
+					echo "Skipping ${env.STAGE_NAME} stage as running on Dry run"
+				} else if (params.RUN_DOWNSTREAM_JOBS) {
+					buildsToRun = branchProperties.gceBasedJobs
+					ArrayList jobNames = buildsToRun.split('\\,')
+					jobNames.each { jobName ->
+						if (jenkins.jobEnabled("$calledBuildsDir${jobName}")) {
+							echo "Running GCE based test job ${jobName}"
+							jobResults=build job: "$calledBuildsDir${jobName}",
+							parameters: [
+								string(name: 'gce_image_db', value: gceImageDbUrl),
+								string(name: 'provision_type', value: qaJobProvisionType),
+								string(name: "backend", value: "gce"),
+								string(name: 'post_behavior_db_nodes', value: qaNodesPostBehaviorType),
+								string(name: 'post_behavior_loader_nodes', value: qaNodesPostBehaviorType),
+								string(name: 'post_behavior_monitor_nodes', value: qaNodesPostBehaviorType),
+							],
+							propagate: false,
+							wait: false
+						}
+					}
+				}
+			}
+		}
+	}
+}

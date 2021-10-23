@@ -1,0 +1,74 @@
+#!groovy
+
+Map modules = [:]
+
+pipeline {
+	agent {
+			label {
+				label "built-in"
+			}
+		}
+		parameters {
+			string(name: 'DISK_USAGE_THRESHOLD',defaultValue: '', description: 'Define Disk threshold in percentage')
+			booleanParam(name: 'DEBUG_MAIL', defaultValue: false, description: 'Check if you want mail to be sent to build requester only (you).Default will be send to releng')
+			booleanParam(name: 'DRY_RUN', defaultValue: false, description: 'Check this to check pipeline syntax. will not perform anything.')
+		}
+		options {
+			timeout(time: 20, unit: 'MINUTES')
+			buildDiscarder(logRotator(numToKeepStr: '10'))
+		}
+		stages {
+			stage ('Prepare') {
+				steps {
+					script {
+						generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+						branchProperties = readProperties file: 'scripts/jenkins-pipelines/branch-specific.properties'
+						mail = load "${generalProperties.groovyPath}/mail.groovy"
+						general = load "${generalProperties.groovyPath}/general.groovy"
+						jenkins = load "${generalProperties.groovyPath}/jenkins.groovy"
+						skipHeavyOperations = params.DRY_RUN
+						(jobTitle, logText, runningUserID, devAddress, relengAddress, qaAddress) = mail.setMailParameters(
+							dryRun: params.DRY_RUN,
+							debugMail: params.DEBUG_MAIL,
+							branch: "Jenkins-Releng",
+							devAddress: generalProperties.relengMail,
+						)
+
+						//Check IF params.DISK_USAGE_THRESHOLD is null/empty. if it is, the value will be based on the JOB_NAME
+						if (params.DISK_USAGE_THRESHOLD == ''){
+						    DISK_USAGE_THRESHOLD = "${JOB_NAME}".replaceAll("[^0-9.]", "");
+						    println "Default threshold value: ${DISK_USAGE_THRESHOLD}%"
+						}
+						echo "Running build ${JOB_NAME} # ${BUILD_NUMBER}. Workspace is ${pwd()}"
+					}
+				}
+			}
+			stage('Check agents') {
+				steps {
+					script {
+						nodesToCheckThreshold= jenkins.checkJenkinsNodeDiskStatus(DISK_USAGE_THRESHOLD)
+						underThresholdList = "${nodesToCheckThreshold.toString()}"
+						diskUsageAgentList = underThresholdList.replaceAll("[\\[\\],]"," ")
+					}
+				}
+			}
+		}
+			post {
+				//Order is: always, changed, fixed, regression, aborted, failure, success, unstable, and cleanup.
+				always {
+					script {
+						if (diskUsageAgentList?.trim()) {
+							currentBuild.result = 'FAILURE'
+						}
+					}
+				}
+				failure {
+					script {
+						jobDetails = "The Following nodes disk usage is over the configure threshold of ${DISK_USAGE_THRESHOLD}%:\n\n"
+						line1 = "${diskUsageAgentList}\n"
+						mailText = "${jobDetails}${line1}"
+						mail.mailResults("${relengAddress}, ${qaAddress}", "Action Required: Please free disk space on Jenkins node(s)", "${mailText}")
+					}
+				}
+			}
+		}

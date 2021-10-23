@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+# Purpose of this script is to create tag on new AMIs and copy it to another AWS region
+import boto3
+import argparse
+import re
+from dateutil.parser import parse
+import datetime
+import json
+import time
+import sys
+from csv import writer
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--scylla_source_ami_id', required=True,
+                    type=str, help='Scylla source AMI ID')
+parser.add_argument('--build_tag', required=True,
+                    type=str, help="Jenkins Build tag")
+parser.add_argument('--build_id', required=True,
+                    type=str, help="Jenkins Build id")
+parser.add_argument('--git_commit', required=True, type=str,
+                    help="Scylla git commit, tag information")
+parser.add_argument('--scylla_branch', required=True, type=str,
+                    help="Scylla Git branch, tag information")
+parser.add_argument('--base_os', default='Ubuntu:20.04',
+                    type=str, help="Base operating system tag information: centos-7|ubuntu-20.04")
+parser.add_argument('--source_aws_region', default='us-east-1',
+                    type=str, help="The source AWS region to copy AMI from")
+parser.add_argument('--dest_aws_regions', default='us-west-2',
+                    type=str, help="The source AWS region to copy AMI from")
+parser.add_argument('--test_aws_region', default='eu-west-1',
+                    type=str, help="The destination AWS region to copy AMI to")
+parser.add_argument('--regions_file_path', default='regions.txt',
+                    type=str, help="File path to write copied AMI IDs to")
+parser.add_argument('--cloudformation_template_file',
+                    type=str, help="File path to cloudformation template, used for placing AMI IDs in cloudformation file")
+parser.add_argument('--scylla_build_sha_id', type=str,
+                    help="Scylla build SHA id form metadata file")
+parser.add_argument('--scylla_ami_image_name', type=str,
+                    help="Scylla Image name")
+parser.add_argument('--promote', type=bool, default=False,
+                    help="Promote only if true")
+
+args = parser.parse_args()
+
+def create_tags(base_ami, region):
+    # get the tags, and append needed tags
+    client = boto3.client('ec2', region_name=args.source_aws_region)
+    response = client.describe_tags(
+        Filters=[
+            {
+                'Name': 'resource-id',
+                'Values': [base_ami]
+            },
+        ])
+
+    _tags = [dict(Key=t['Key'], Value=t['Value']) for t in response["Tags"]] + [
+        {
+            'Key': 'build-tag',
+            'Value': args.build_tag,
+        },
+        {
+            'Key': 'branch',
+            'Value': args.scylla_branch,
+        },
+        {
+            'Key': 'operating-system',
+            'Value': args.base_os,
+        },
+        {
+            'Key': 'build-id',
+            'Value': args.build_id,
+        },
+        {
+            'Key': 'scylla-git-commit',
+            'Value': args.git_commit,
+        },
+        {
+            'Key': 'scylla-build-sha-id',
+            'Value': args.scylla_build_sha_id,
+        },
+    ]
+    return _tags
+
+
+def create_ami_tags(ami_id, region, tags):
+    client = boto3.client('ec2', region_name=region)
+    response = client.create_tags(
+        Resources=[
+            ami_id,
+        ],
+        Tags=tags,
+    )
+
+def copy_ami_image(region, scylla_ami_image_name):
+    client = boto3.client('ec2', region_name=region)
+    today = time.strftime("%Y%m%d%H%M%S")
+    if args.promote:
+        description = scylla_ami_image_name
+    else:
+        description = f'Scylla-{args.scylla_branch}{args.base_os}-nightly-{today}'
+    output = client.copy_image(
+        Description=description,
+        SourceImageId=args.scylla_source_ami_id,
+        SourceRegion=args.source_aws_region,
+        Name=description
+    )
+    output = json.loads(json.dumps(output))
+    return output["ImageId"]
+
+def update_cloudformation_template(region, ami_id):
+    with open(args.cloudformation_template_file, 'r+') as f:
+        data = f.read()
+        data = data.replace(f'placeholder-{region}', ami_id)
+        f.seek(0)
+        f.write(data)
+        f.truncate()
+
+def get_region_name_and_id(scylla_ami_image_name, regions_file):
+    ec2 = boto3.client("ec2", region_name=args.source_aws_region)
+    ec2_responses = ec2.describe_regions()
+    ssm_client = boto3.client('ssm', region_name=args.source_aws_region)
+    append_list_as_row(regions_file, ['Region', 'Region Code', 'AMI ID'])
+    for resp in ec2_responses['Regions']:
+        region_id = resp['RegionName']
+        tmp = f'/aws/service/global-infrastructure/regions/%s/longName' % region_id
+        ssm_response = ssm_client.get_parameter(Name = tmp)
+        region_name = ssm_response['Parameter']['Value']
+        print(f"region_id: {region_id}, region_name: {region_name}")
+        copied_ami_id = copy_ami_image(region_id, scylla_ami_image_name)
+        create_ami_tags(copied_ami_id, region_id, final_tags)
+        # Append a list as new line to an old csv file
+        append_list_as_row(regions_file, [region_name, region_id, copied_ami_id])
+        update_cloudformation_template(region_id, copied_ami_id)
+
+def append_list_as_row(file_name, list_of_elem):
+    # Open file in append mode
+    with open(file_name, 'a+', newline='') as f:
+        # Create a writer object from csv module
+        csv_writer = writer(f)
+        # Add contents of list as last row in the csv file
+        csv_writer.writerow(list_of_elem)
+
+final_tags = create_tags(args.scylla_source_ami_id, args.source_aws_region)
+
+create_ami_tags(args.scylla_source_ami_id, args.source_aws_region, final_tags)
+
+if args.promote:
+    update_cloudformation_template(args.source_aws_region, args.scylla_source_ami_id)
+    get_region_name_and_id(args.scylla_ami_image_name, args.regions_file_path)
+else:
+    testing_region_ami_id = copy_ami_image(args.test_aws_region, args.scylla_ami_image_name)
+    create_ami_tags(testing_region_ami_id, args.test_aws_region, final_tags)
+    print(testing_region_ami_id)
+
+    if args.source_aws_region != args.test_aws_region:
+        append_list_as_row(args.regions_file_path, [args.source_aws_region, args.scylla_source_ami_id])
+    append_list_as_row(args.regions_file_path, [args.test_aws_region, testing_region_ami_id])
+
+    update_cloudformation_template(args.source_aws_region, args.scylla_source_ami_id)
+    update_cloudformation_template(args.test_aws_region, args.scylla_source_ami_id)

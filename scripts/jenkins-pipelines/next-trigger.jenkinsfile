@@ -1,0 +1,178 @@
+#!groovy
+// Pipeline Trigger next - This job will track github new commits in next for multiple repos and will trigger next once there are changes.
+// While next is running this job will wait.
+// When next is not running, this job will trigger next upon changes and will choose the available Jenkins node (Monster, Godzilla or ec2-fleet-next)
+// If you work on a fork, also set the RELENG_REPO with your fork such as git@github.com:hagitsegev/scylla-pkg or
+// use the default repo of git@github.com:scylladb/scylla-pkg or git@github.com:scylladb/scylla-enterprise-pkg
+
+
+Map modules = [:]
+pipeline {
+	parameters {
+		// Mandatory
+		string(name: 'RELENG_REPO', defaultValue: '', description: 'Branch of pkg repo or fork. If empty - will take scylla-pkg repo (examples: git@github.com:scylladb/scylla-pkg, git@github.com:scylladb/scylla-enterprise-pkg, git@github.com:hagitsegev/scylla-pkg)')
+		string(name: 'RELENG_BRANCH', defaultValue: '', description: '')
+
+		// Optional
+		booleanParam(name: 'FORCE_RUNNING_BUILDS_EVEN_IF_NO_CHANGES', defaultValue: false, description: 'Set to run builds even if not changes between this run and last success run')
+		booleanParam(name: 'DEBUG_MAIL', defaultValue: false, description: 'Uncheck if you want mail to rnd-int. Default is to sent to build requester only (you).')
+		booleanParam(name: 'DRY_RUN', defaultValue: false, description: 'Check this to check pipeline syntax. will not perform anything.')
+	}
+
+	agent {
+		label "built-in"
+	}
+	triggers {
+		cron("H/15 * * * *")
+	}
+
+	options {
+		disableConcurrentBuilds()
+		timeout(time: 50, unit: 'MINUTES')
+		buildDiscarder(
+			logRotator(
+				numToKeepStr: '40',
+				daysToKeepStr: '14'
+			)
+		)
+	}
+
+	stages {
+		stage ('Prepare') {
+			steps {
+				script {
+					generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+					general = load "${generalProperties.groovyPath}/general.groovy"
+					general.initPipeline()
+
+					gitRepoShaFilePath = "$WORKSPACE/${gitProperties.scyllaPkgCheckoutDir}/${generalProperties.gitRepoShaFileName}"
+					nextJobPath = "$calledBuildsDir${branchProperties.nextJobName}"
+					forceBuild = params.FORCE_RUNNING_BUILDS_EVEN_IF_NO_CHANGES
+					lastNextBuildNum = "NA"
+					git.cleanWorkSpaceUponRequest(false)
+					ignoreMissingArtifact = true
+					try {
+						lastNextBuildNum = Jenkins.instance.getItemByFullName(nextJobPath).lastBuild.number.toString()
+						echo "last_next_job_number: |$lastNextBuildNum|"
+						artifact.getArtifact(artifact: generalProperties.jobSummaryFile,
+							targetPath: WORKSPACE,
+							artifactSourceJob: nextJobPath,
+							artifactSourceJobNum: lastNextBuildNum,
+							ignoreMissingArtifact: ignoreMissingArtifact)
+
+						if (! fileExists(generalProperties.jobSummaryFile)) {
+							//Fixme: Improve the termination check.
+							echo "Could not find next summary file. This could happen on first run for a release (no next was running yet) or on a spot termination. Triggering next."
+							forceBuild = true
+						}
+					} catch (error) {
+						forceBuild = true
+					}
+				}
+			}
+		}
+
+		stage('Checkout') {
+			steps {
+				script {
+					relengBranch = params.RELENG_BRANCH ?: "${branchProperties.nextBranchName}"
+					lastStage = env.STAGE_NAME
+					git.checkoutToDir (relengRepo, relengBranch, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+					general.lsPath (WORKSPACE, "Workspace content after check-outs")
+				}
+			}
+		}
+
+		stage('Check if need to run') {
+			steps {
+				script {
+					lastStage = env.STAGE_NAME
+					git.createShaProperties (
+						shellScriptsDir: "$WORKSPACE/${gitProperties.scyllaPkgCheckoutDir}/${generalProperties.pipelinesShellPath}",
+						gitRepoShaFilePath: gitRepoShaFilePath,
+						branch: branchProperties.nextBranchName,
+						qaBranch: "NA",
+						qaRepoList: "NA",
+						repoList: branchProperties.nextGitRepositories)
+
+					sh "last_next_job_number=$lastNextBuildNum >> $gitRepoShaFilePath"
+					if (artifact.publishArtifactsStatus(generalProperties.gitRepoShaFileName, gitProperties.scyllaPkgCheckoutDir)) {
+						error("Could not publish some item(s). See log for details")
+					}
+
+					if (forceBuild) {
+						echo "User requested to force run, or didn't find last build's sha file to compare. Running again, no need to check commits"
+						env.newCommitsInThisBuild = true
+					} else {
+						artifact.getArtifact(artifact: generalProperties.checkoutGitRepoShaFileName,
+							targetPath: "last-shas",
+							artifactSourceJob: nextJobPath,
+							artifactSourceJobNum: lastNextBuildNum,
+							ignoreMissingArtifact: ignoreMissingArtifact)
+						env.newCommitsInThisBuild = !(general.filesAreEqual("$WORKSPACE/${gitProperties.scyllaPkgCheckoutDir}/${generalProperties.gitRepoShaFileName}", "Current build's SHAs", "$WORKSPACE/last-shas/${generalProperties.checkoutGitRepoShaFileName}", "Last build's SHAs"))
+					}
+				}
+			}
+		}
+		stage ('Trigger Next') {
+			when {
+				anyOf {
+					environment name: 'newCommitsInThisBuild', value: 'true' ; expression {params.FORCE_RUNNING_BUILDS_EVEN_IF_NO_CHANGES}
+				}
+			}
+			steps {
+				script {
+					boolean propagateNext = false
+					boolean waitNext = false
+					x86TargetNextBuilder = jenkins.nextAvailableJenkinsBuilder()
+					if (params.DRY_RUN) {
+						echo "This is a dry-run. Will run next on pacakger instead of |$x86TargetNextBuilder| and will wait for results"
+						x86TargetNextBuilder = "packager"
+						propagateNext = true
+						waitNext = true
+					}
+
+					lastStage = env.STAGE_NAME
+					jobResults=build job: "$calledBuildsDir${branchProperties.relocUploaderJobName}",
+					parameters: [
+						[$class: 'StringParameterValue', name: 'X86_NODE_PARAM', value: x86TargetNextBuilder],
+						[$class: 'StringParameterValue', name: 'RELENG_BRANCH', value: relengBranch],
+						[$class: 'StringParameterValue', name: 'RELENG_REPO', value: relengRepo],
+						[$class: 'BooleanParameterValue', name: 'DRY_RUN', value: params.DRY_RUN] // Run jobs as dry run
+					],
+					propagate: propagateNext,
+					wait: waitNext
+				}
+			}
+		}
+	}
+
+	post {
+		//Order is: always, changed, fixed, regression, aborted, failure, success, unstable, and cleanup.
+		always {
+			script {
+				echo "Last stage: |${lastStage}|"
+				if (binding.hasVariable('initPipelineDone')) {
+					mail.mailIfError("${relengAddress}", "${currentBuild.currentResult}: ${jobTitle}", "${currentBuild.currentResult}: $jobTitle on stage $lastStage: $logText")
+					git.cleanWorkSpaceUponRequest(false)
+				} else if (!(JOB_NAME.contains("releng-testing") || params.DRY_RUN || params.DEBUG_MAIL)) {
+					mail (
+						to: "releng@scylladb.com",
+						subject: "${currentBuild.currentResult}: ${env.JOB_NAME} [${env.BUILD_NUMBER}]",
+						body: "${env.JOB_NAME} [${env.BUILD_NUMBER}] ${currentBuild.currentResult} at the very beginning. Please see Jenkins logs for details"
+					)
+					cleanWs()
+				} else {
+					cleanWs()
+				}
+
+			}
+		}
+
+		fixed {
+			script {
+				mail.mailFixed("$relengAddress", "Fixed ${currentBuild.currentResult}: $jobTitle", "Fixed ${currentBuild.currentResult}: $jobTitle: $logText")
+			}
+		}
+	}
+}

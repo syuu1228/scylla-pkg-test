@@ -1,0 +1,103 @@
+#!groovy
+
+Map modules = [:]
+
+pipeline {
+	agent {
+		label {
+			label "built-in"
+		}
+	}
+	parameters {
+		choice(name: 'AWS_REGION',
+			choices: [
+				'ALL',
+				'ap-east-1',
+				'ap-northeast-1',
+				'ap-northeast-2',
+				'ap-northeast-3',
+				'ap-south-1',
+				'ap-southeast-1',
+				'ap-southeast-2',
+				'ca-central-1',
+				'eu-central-1',
+				'eu-north-1',
+				'eu-west-1',
+				'eu-west-2',
+				'eu-west-3',
+				'me-south-1',
+				'sa-east-1',
+				'us-east-1',
+				'us-east-2',
+				'us-west-1',
+				'us-west-2'
+			],
+			description: 'Choose on which AWS region to run, default is all regions')
+		string(name: 'FILTER_BY_AMI_NAME', defaultValue: '', description: 'Apply filer based on AMI name, for example: "ScyllaDB 4.1.*" or "ScyllaDB 4.1.1" or "ScyllaDb Enterprise 2020.1.rc0", default is * which means no filter')
+		string(name: 'FILTER_BY_DAYS', defaultValue:'1000', description: 'Will show only AMIs Older then configured value. For todays AMIs write -1')
+		booleanParam(name: 'DEBUG_MAIL', defaultValue: false, description: 'Check if you want mail to be sent to build requester only (you).Default will be send to releng')
+		booleanParam(name: 'DRY_RUN', defaultValue: true, description: 'Uncheck if you wish to delete the AMIs.Make sure you do dry_run first!!!')
+	}
+		options {
+			timeout(time: 20, unit: 'MINUTES')
+			buildDiscarder(logRotator(numToKeepStr: '10'))
+		}
+
+		environment {
+			AWS_ACCESS_KEY_ID      = credentials('jenkins2-aws-secret-key-id')
+			AWS_SECRET_ACCESS_KEY  = credentials('jenkins2-aws-secret-access-key')
+		}
+
+		stages {
+			stage ('Prepare') {
+				steps {
+					script {
+						generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+						mail = load "${generalProperties.groovyPath}/mail.groovy"
+						general = load "${generalProperties.groovyPath}/general.groovy"
+						pythonScriptsDir = "$WORKSPACE/${generalProperties.pipelinesPythonPath}"
+						(jobTitle, logText, runningUserID, devAddress, relengAddress, qaAddress) = mail.setMailParameters(
+							dryRun: params.DRY_RUN,
+							debugMail: params.DEBUG_MAIL,
+							branch: "Jenkins-Releng",
+							devAddress: generalProperties.relengMail,
+						)
+
+						echo "Running build $JOB_NAME # ${BUILD_NUMBER}. Workspace is ${pwd()}"
+						if ("${params.FILTER_BY_AMI_NAME}" == "") {
+							currentBuild.result = 'FAILURE'
+							error("Error: Missing mandatory parameters: FILTER_BY_AMI_NAME")
+						}
+						args = "--region ${params.AWS_REGION}"
+						args += " --aws_account_id ${generalProperties.awsAccountId}"
+						args += " --filter \"${params.FILTER_BY_AMI_NAME}\""
+						if (params.FILTER_BY_DAYS) {
+							args += " --age ${params.FILTER_BY_DAYS}"
+						}
+					}
+				}
+			}
+			stage('List of AMI images') {
+				steps {
+					script {
+						sh "${pythonScriptsDir}/aws-ec2-delete-ami ${args} --dry_run"
+					}
+				}
+			}
+			stage('AMI cleanup') {
+				steps {
+					script {
+						if (! params.DRY_RUN) {
+							timeout(time: 15, unit: "MINUTES") {
+								input message: 'Please review logs and approve the list of AMIs to be delete. Approve?', ok: 'Yes'
+								sh "${pythonScriptsDir}/aws-ec2-delete-ami ${args}"
+							}
+						}
+						else {
+							echo "Skipping AMI Cleanup stage since DRY_RUN value is True"
+						}
+					}
+				}
+			}
+		}
+	}

@@ -1,0 +1,319 @@
+#!groovy
+// Pipeline dtest
+// In order to debug, set RELENG_BRANCH on Jenkins job with value of the debug branch.
+// example: refs/heads/build-pipeline-into-scm
+// If you work on a fork, also set the RELENG_REPO with your fork such as git@github.com:hagitsegev/scylla-pkg or
+// use the default repo of git@github.com:scylladb/scylla-pkg or git@github.com:scylladb/scylla-enterprise-pkg
+
+
+Map modules = [:]
+pipeline {
+	parameters {
+		// ToDo: set default to false when Issue #1747 is resolved (set fleet back to life)
+		booleanParam(name: 'RUN_DTEST_FULL', defaultValue: true, description: 'Uncheck this to skip FullDtest, when running in parallel mode only!.')
+		booleanParam(name: 'RUN_DTEST_HEAVY', defaultValue: true, description: 'Check this to run DtestHeavy, when running in parallel mode only!.')
+		booleanParam(name: 'RUN_DTEST_LONG', defaultValue: true, description: 'Check this to run DtestLong, when running in parallel mode only!.')
+		// ToDo: Set default to packager when 1747 is resolved  (set fleet back to life)
+		string(name: 'X86_NODE_PARAM', defaultValue: 'ec2-fleet-next', description: 'Machine to run on. Useful options for parallel dtest: packager, or for local runs: scylla-dtest, monster, godzilla.')
+		string(name: 'SPLIT_FLEET_LABEL', defaultValue: '', description: 'On which spot instace fleet to run the parallel jobs. default: dtest-fleet')
+
+		//Not mandatory
+		string(name: 'TIMEOUT_PARAM', defaultValue: '24', description: 'hours. This time includes the time needed to wait for local machines. Could be much less for cloud machines.')
+		string(name: 'BUILD_MODE', defaultValue: '', description: 'Choose: dev|release|debug, If empty, will guess the needed info from job name')
+		choice(name: 'TEST_RUNNER', choices: ['nosetests','pytests'], description: 'Which test runner to run')
+		string(name: 'ARTIFACT_SOURCE_JOB_NAME', defaultValue: '', description: 'Build path to take Relocatable data from')
+		string(name: 'ARTIFACT_SOURCE_BUILD_NUM', defaultValue: '', description: 'Build ID to take relocatable package files from. Leave empty to use last success build.')
+		string(name: 'ARTIFACT_WEB_URL', defaultValue: 'latest', description: 'URL to take reloc items from. Use when reloc is not available on jenkins, or when running on AWS, which will download faster from S3.')
+		booleanParam(name: 'DTEST_DEBUG_INFO', defaultValue: false, description: 'Check this to set env PRINT_DEBUG=true and DEBUG=true when running dtest')
+		booleanParam(name: 'DTEST_KEEP_LOGS', defaultValue: false, description: 'Check this, to keep dtest logs (set KEEP_LOGS=true)')
+		string(name: 'INCLUDE_DTESTS', defaultValue: '' , description: 'Specify which dtests to run. default for release: -a dtest-full,!next-gating,!dtest-long,!dtest-heavy, for debug: -a dtest-debug. bootstrap_test:TestBootstrap.start_stop_test_node - just an example of a specific test. Pay attention to syntax. Tests should be separated by spaces, attributes by commas.')
+		string(name: 'EXCLUDE_DTESTS', defaultValue: '', description: 'Specify dtests to exclude.')
+		string(name: 'NUMBER_RANDOM_DTESTS', defaultValue: '', description: 'Specify number of random dtests to run. (Leave empty for none [default]; set to "all" to shuffle all tests)')
+		string(name: 'RANDOM_DTESTS_SEED', defaultValue: '', description: 'Optionally specify a random seed for reproducing a run of random dtests (printed as `random_seed` by dtest.sh)')
+		string(name: 'SCYLLA_EXT_OPTS_EXTRA_SETTINGS', defaultValue: '--abort-on-seastar-bad-alloc --abort-on-lsa-bad-alloc=1', description: 'Anything you put here will be added to any default settings of SCYLLA_EXT_OPTS env var sent to nose.')
+		string(name: 'SCYLLA_EXT_ENV_EXTRA_SETTINGS', defaultValue: 'ASAN_OPTIONS=disable_coredump=0:abort_on_error=1;UBSAN_OPTIONS=halt_on_error=1:abort_on_error=1;BOOST_TEST_CATCH_SYSTEM_ERRORS=no', description: 'Anything you put here will be added to any default settings of SCYLLA_EXT_ENV env var sent to nose.')
+		string(name: 'SCYLLA_BRANCH', defaultValue: '', description: '')
+		string(name: 'SCYLLA_DTEST_BRANCH', defaultValue: '', description: '')
+		string(name: 'SCYLLA_CCM_BRANCH', defaultValue: '', description: '')
+		booleanParam(name: 'PRESERVE_WORKSPACE', defaultValue: false, description: 'Check this if you need the workspace to remain (for debug)')
+		booleanParam(name: 'DEBUG_MAIL', defaultValue: false, description: 'Uncheck if you want mail to rnd-int. Default is to sent to build requester only (you).')
+		booleanParam(name: 'DRY_RUN', defaultValue: false, description: 'Check this to check pipeline syntax. will not perform anything.')
+		string(name: 'RELENG_REPO', defaultValue: '', description: 'Branch of pkg repo or fork. If empty - will take scylla-pkg repo (examples: git@github.com:scylladb/scylla-pkg, git@github.com:scylladb/scylla-enterprise-pkg, git@github.com:hagitsegev/scylla-pkg)')
+		string(name: 'RELENG_BRANCH', defaultValue: '', description: 'Branch of pkg repo. If empty - will take stable branch (master)')
+	}
+
+	agent {
+		label {
+			label "built-in"
+		}
+	}
+
+	options {
+		disableConcurrentBuilds()
+		timeout(time: env.TIMEOUT_PARAM, unit: 'HOURS')
+		buildDiscarder(
+			logRotator(
+				numToKeepStr: env.JOB_NAME.contains("parallel") ? '40': '200',
+				daysToKeepStr: env.JOB_NAME.contains("releng-testing") ? '14': ''
+			)
+		)
+	}
+
+	environment {
+		AWS_ACCESS_KEY_ID     = credentials('jenkins2-aws-secret-key-id')
+		AWS_SECRET_ACCESS_KEY = credentials('jenkins2-aws-secret-access-key')
+		GITHUB_TOKEN = credentials('github-api-access-token')
+	}
+
+	stages {
+
+		stage ('Prepare') {
+			steps {
+				script {
+					generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+					general = load "${generalProperties.groovyPath}/general.groovy"
+					general.initPipeline()
+
+					artifactSourceJob = params.ARTIFACT_SOURCE_JOB_NAME ?: "${branchProperties.calledBuildsDir}${branchProperties.relocUploaderJobName}"
+					buildMode = params.BUILD_MODE
+					excludeTests = params.EXCLUDE_DTESTS ?: ""
+					includeDtests = params.INCLUDE_DTESTS ?: ""
+					if (buildMode == '') {
+						if (JOB_NAME.contains("release")) {
+							buildMode = "release"
+						} else if (JOB_NAME.contains("debug")) {
+							buildMode = "debug"
+							includeDtests = params.INCLUDE_DTESTS ?: "-a dtest-debug"
+						} else {
+						 	error("Error: Could not guess build mode upon job name. Should contain release or debug")
+						}
+					}
+					artifactSourceJobNum = params.ARTIFACT_SOURCE_BUILD_NUM ?: Jenkins.instance.getItemByFullName(artifactSourceJob).lastSuccessfulBuild.number.toString()
+					paramArtifactWebUrl = params.ARTIFACT_WEB_URL ?: "latest"
+					cloudUrl = artifact.getLastSuccessfulUrl (
+						artifactWebUrl: paramArtifactWebUrl,
+						artifactSourceJob: artifactSourceJob,
+						artifactSourceJobNum: artifactSourceJobNum,
+						fieldName: "reloc-pack-url:"
+					)
+
+					if (JOB_NAME.contains("parallel")) {
+						runParallelDtest = true
+						nodeParam = params.SPLIT_FLEET_LABEL ?: generalProperties.targetDtestBuilder
+						splitMaxNodesForFull = "100"
+						heavyAndLongSplitTimeTarget = "1000"
+						if (buildMode == "release") {
+							splitTimeTarget = "360"
+						} else if (buildMode == "debug") {
+							splitTimeTarget = "720"
+						}
+						splitMaxNodesForHeavyAndLong = "1"
+						includeDtests = params.INCLUDE_DTESTS ?: "-a dtest-full,!next-gating,!dtest-long,!dtest-heavy"
+						isSpotInstanceMachine = true
+						cloudUrl = cloudUrl.replaceAll('downloads.scylladb.com', branchProperties.internalS3UrlPrefix)
+					} else {
+						runParallelDtest = false
+						nodeParam = params.X86_NODE_PARAM
+						isSpotInstanceMachine = false
+					}
+					echo "Build mode upon parameter |${params.BUILD_MODE}| or upon job name |${JOB_NAME}|: |${buildMode}|"
+
+					runRandomDtest = false
+					numberRandomDtests = params.NUMBER_RANDOM_DTESTS
+					if (numberRandomDtests == '') {
+						if (JOB_NAME.contains("random")) {
+							numberRandomDtests = "50"
+							runRandomDtest = true
+							runParallelDtest = false
+							includeDtests = ""
+							excludeTests = ""
+						}
+					}
+					echo "Random dtest orig flag: |${params.BUILD_MODE}| upon job name |${JOB_NAME}|: |${numberRandomDtests}|"
+				}
+			}
+		}
+
+		stage('Run Dtest Local') {
+			when {
+				expression { !runParallelDtest }
+			}
+			steps {
+				script {
+					node(nodeParam) {
+						lastStage = env.STAGE_NAME
+						test.prepareDtestLocalTree (
+							dryRun: params.DRY_RUN,
+							preserveWorkspace: params.PRESERVE_WORKSPACE,
+							relengRepo: params.RELENG_REPO,
+							relengBranch: params.RELENG_BRANCH,
+							scyllaBranch: params.SCYLLA_BRANCH,
+							dtestBranch: params.SCYLLA_DTEST_BRANCH,
+							ccmBranch: params.SCYLLA_CCM_BRANCH,
+							artifactWebUrl: cloudUrl,
+							artifactSourceJob: artifactSourceJob,
+							artifactSourceJobNum: artifactSourceJobNum,
+							buildMode: buildMode,
+							isSpotInstanceMachine: isSpotInstanceMachine,
+							architecture: branchProperties.x86ArchName,
+						)
+
+						test.doDtest(
+							dryRun: params.DRY_RUN,
+							dtestMode: buildMode,
+							testRunner: params.TEST_RUNNER,
+							dtestDebugInfoFlag: params.DTEST_DEBUG_INFO,
+							dtestKeepLogsFlag: params.DTEST_KEEP_LOGS,
+							excludeTests: excludeTests,
+							includeTests: includeDtests,
+							extOpts: params.SCYLLA_EXT_OPTS_EXTRA_SETTINGS,
+							extEnv: params.SCYLLA_EXT_ENV_EXTRA_SETTINGS,
+							randomDtests: numberRandomDtests,
+							randomDtestsSeed: params.RANDOM_DTESTS_SEED,
+							dtestType: "all",
+							architecture: branchProperties.x86ArchName,
+						)
+					}
+				}
+			}
+		}
+
+		stage('Run Dtest Parallel Cloud Machines') {
+			when {
+				expression { runParallelDtest }
+			}
+
+			environment {
+				AWS_ACCESS_KEY_ID     = credentials('jenkins2-aws-secret-key-id')
+				AWS_SECRET_ACCESS_KEY = credentials('jenkins2-aws-secret-access-key')
+				GITHUB_TOKEN = credentials('github-api-access-token')
+			}
+
+			parallel {
+				stage ('FullDtest') {
+					when {
+						expression { params.RUN_DTEST_FULL }
+					}
+					steps {
+						node(nodeParam) {
+							script {
+								if (params.RUN_DTEST_FULL) {
+									String splitFleetLabal = params.SPLIT_FLEET_LABEL ?: generalProperties.targetDtestBuilder
+									String dtestType = "full"
+									runDtest (splitMaxNodesForFull, includeDtests, splitFleetLabal, dtestType, splitTimeTarget)
+								}
+							}
+						}
+					}
+				}
+				stage ('HeavyDtest') {
+					when {
+						expression { params.RUN_DTEST_HEAVY }
+					}
+					steps {
+						node(nodeParam) {
+							script {
+								if (buildMode.contains("release") && params.RUN_DTEST_HEAVY) {
+									String dtestType = "heavy"
+									runDtest (splitMaxNodesForHeavyAndLong, "-a dtest-heavy", generalProperties.targetDtestStrongBuilder, dtestType, heavyAndLongSplitTimeTarget)
+								}
+							}
+						}
+					}
+				}
+				stage ('LongDtest') {
+					when {
+						expression { params.RUN_DTEST_LONG }
+					}
+					steps {
+						node(nodeParam) {
+							script {
+								if (buildMode.contains("release") && params.RUN_DTEST_LONG) {
+									String dtestType = "long"
+									runDtest (splitMaxNodesForHeavyAndLong, "-a dtest-long", generalProperties.targetDtestStrongBuilder, dtestType, heavyAndLongSplitTimeTarget)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	post {
+		//Order is: always, changed, fixed, regression, aborted, failure, success, unstable, and cleanup.
+		always {
+			script {
+				if (binding.hasVariable('initPipelineDone')) {
+					jenkins.isSpotTermination(lastStage)
+
+					mail.mailIfError("${devAddress}", "${currentBuild.currentResult}: ${jobTitle}", "${currentBuild.currentResult}: ${jobTitle}: ${logText}")
+					git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+				} else if (!(JOB_NAME.contains("releng-testing") || params.DRY_RUN || params.DEBUG_MAIL)) {
+					mail (
+						to: "releng@scylladb.com",
+						subject: "${currentBuild.currentResult}: ${env.JOB_NAME} [${env.BUILD_NUMBER}]",
+						body: "${env.JOB_NAME} [${env.BUILD_NUMBER}] ${currentBuild.currentResult} at the very beginning. Please see Jenkins logs for details"
+					)
+					cleanWs()
+				} else {
+					cleanWs()
+				}
+			}
+		}
+
+		fixed {
+			script {
+				mail.mailFixed("${devAddress}", "Fixed ${currentBuild.currentResult}: ${jobTitle}", "Fixed ${currentBuild.currentResult}: ${jobTitle}: ${logText}")
+			}
+		}
+	}
+}
+
+def runDtest(String splitMaxNodes, String includeDtestsTag, String splitFleetLabal, String dtestType, String splitTimeTarget) {
+	lastStage = env.STAGE_NAME
+	test.prepareDtestLocalTree (
+		dryRun: params.DRY_RUN,
+		preserveWorkspace: params.PRESERVE_WORKSPACE,
+		relengRepo: params.RELENG_REPO,
+		relengBranch: params.RELENG_BRANCH,
+		scyllaBranch: params.SCYLLA_BRANCH,
+		dtestBranch: params.SCYLLA_DTEST_BRANCH,
+		ccmBranch: params.SCYLLA_CCM_BRANCH,
+		artifactWebUrl: cloudUrl,
+		artifactSourceJob: artifactSourceJob,
+		artifactSourceJobNum: artifactSourceJobNum,
+		buildMode: buildMode,
+		isSpotInstanceMachine: isSpotInstanceMachine,
+		architecture: branchProperties.x86ArchName,
+	)
+
+	test.collectDtestList (includeDtestsTag, excludeTests, dtestType)
+	numOfSplitFiles = test.splitAndCopyDtestJobs (
+		splitTimeTarget: splitTimeTarget,
+		splitMaxNodes: splitMaxNodes,
+		buildMode: buildMode,
+		dtestType: dtestType,
+	)
+
+	test.doParallelDtest(
+		dryRun: params.DRY_RUN,
+		dtestMode: buildMode,
+		testRunner: params.TEST_RUNNER,
+		downloadFromCloud: true,
+		cloudUrl: cloudUrl,
+		dtestDebugInfoFlag: params.DTEST_DEBUG_INFO,
+		dtestKeepLogsFlag: params.DTEST_KEEP_LOGS,
+		extOpts: params.SCYLLA_EXT_OPTS_EXTRA_SETTINGS,
+		extEnv: params.SCYLLA_EXT_ENV_EXTRA_SETTINGS,
+		numOfSplitFiles: numOfSplitFiles,
+		runningUserID: runningUserID,
+		relengRepo: params.RELENG_REPO,
+		relengBranch: params.RELENG_BRANCH,
+		dtestBranch: params.SCYLLA_DTEST_BRANCH,
+		ccmBranch: params.SCYLLA_CCM_BRANCH,
+		splitFleetLabal: splitFleetLabal,
+		dtestType: dtestType,
+		architecture: branchProperties.x86ArchName,
+	)
+}

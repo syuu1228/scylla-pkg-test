@@ -1,0 +1,197 @@
+#!groovy
+// Pipeline manager-build
+// In order to debug, set branch on Jenkins job pipeline section and /or parameter with value of the debug branch.
+// Parameter is used to run sh scripts, pipeline to checkout the pipeline and groovy functions.
+// It is needed to be hard coded on pipeline, to enable each job to take its value of the branch,
+// otherwise - value is deleted / get hte same value from the pipeline code each time it runs.
+// example: refs/heads/build-pipeline-into-scm
+// If you work on a fork, also set the RELENG_REPO with your fork such as git@github.com:hagitsegev/scylla-pkg or
+// use the default repo of git@github.com:scylladb/scylla-pkg or git@github.com:scylladb/scylla-enterprise-pkg
+
+
+Map modules = [:]
+pipeline {
+	parameters {
+		// Mandatory:
+		string(name: 'X86_NODE_PARAM', defaultValue: 'packager', description: 'On which node to run the build phase.')
+		// Optional
+		string(name: 'MANAGER_REPO', defaultValue: '', description: 'manager repo url. If empty - will take scylla-manager repo')
+		string(name: 'MANAGER_BRANCH', defaultValue: '', description: 'Branch for scylla-manager. If empty - will take stable branch (master)')
+		string(name: 'RELENG_REPO', defaultValue: '', description: 'Branch of pkg repo or fork. If empty - will take scylla-pkg repo (examples: git@github.com:scylladb/scylla-pkg, git@github.com:scylladb/scylla-enterprise-pkg, git@github.com:hagitsegev/scylla-pkg)')
+		string(name: 'RELENG_BRANCH', defaultValue: '', description: 'Branch of pkg repo. If empty - will take master branch (master, branch-3.1)')
+		booleanParam(name: 'SKIP_PROMOTE_LATEST', defaultValue: false, description: 'Set to skip promote to latest - for debug use')
+		booleanParam(name: 'RUN_DEB_BASED_DOWNSTREAM_JOBS', defaultValue: true, description: 'Unset this to avoid calling ubuntu/debian based downstream jobs')
+		booleanParam(name: 'RUN_RPM_BASED_DOWNSTREAM_JOBS', defaultValue: true, description: 'Unset this to avoid calling centos based downstream jobs')
+		booleanParam(name: 'DRY_RUN', defaultValue: false, description: 'Set to test the pipeline code')
+		booleanParam(name: 'PRESERVE_WORKSPACE', defaultValue: false, description: 'Set to avoid cleaning workspace before and after run, for debug needs')
+		booleanParam(name: 'DEBUG_MAIL', defaultValue: false, description: 'Set to send mails to requester only')
+	}
+
+	agent {
+		label {
+			label "${params.X86_NODE_PARAM}"
+		}
+	}
+
+	environment {
+		AWS_ACCESS_KEY_ID     = credentials('jenkins2-aws-secret-key-id')
+		AWS_SECRET_ACCESS_KEY = credentials('jenkins2-aws-secret-access-key')
+		SCYLLA_GPG_PRIVATE_KEY = credentials('scylladb-package-signing-key-2020')
+		SCYLLA_GPG_PUBLIC_KEY = credentials('scylladb-package-signing-key-2020-public')
+		SCYLLA_GPG_KEYID = credentials('scylladb-package-signing-key-2020-public-keyid')
+	}
+
+	options {
+		disableConcurrentBuilds()
+		timeout(time: 30, unit: 'MINUTES')
+		buildDiscarder(logRotator(numToKeepStr: '10'))
+	}
+
+	stages {
+		stage ('Prepare') {
+			steps {
+				script {
+					generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+					general = load "${generalProperties.groovyPath}/general.groovy"
+					boolean useManager = true
+					general.initPipeline(useManager)
+					(utcTextTimeStamp, urlId) = artifact.cloudBuildIdPath()
+					calledBuildsDir = jenkins.prodOrDebugFolders()
+
+					managerRepo = params.MANAGER_REPO ?: gitProperties.scyllaManagerRepoUrl
+					managerBranch = params.MANAGER_BRANCH ?: branchProperties.stableBranchName
+				}
+			}
+		}
+
+		stage('Checkout') {
+			steps {
+				script {
+					git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+					git.checkoutToDir (relengRepo, relengBranch, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+					git.checkoutToDir (managerRepo, managerBranch, gitProperties.scyllaManagerCheckoutDir)
+				}
+			}
+		}
+
+		stage('Build Manager') {
+			steps {
+				script {
+					jenkins.checkAndTagAwsInstance(runningUserID)
+					managerUrlID = "$managerBranch/$urlId"
+					managerRpmUrl = general.setTestingUrlIfNeeded ("${branchProperties.downloadsRpmUnstablePath}/$managerUrlID/")
+					managerDebUrl = general.setTestingUrlIfNeeded ("${branchProperties.downloadsDebUnstablePath}/$managerUrlID/")
+					managerRpmRepoUrl = "$managerRpmUrl${branchProperties.repoFileName}"
+					managerDebListUrl = "$managerDebUrl${branchProperties.scyllaUnifiedPkgRepo}/${branchProperties.listFileName}"
+					scyllaManagerPackage = "${managerRpmUrl}${branchProperties.productName}/${generalProperties.x86ArchName}/"
+
+					build.createManagerBuildMetadataFile (
+						dryRun: params.DRY_RUN,
+						urlId: urlId,
+						utcTextTimeStamp: utcTextTimeStamp,
+					)
+
+					(managerVersion, managerRelease) = build.buildScyllaManager (
+						dryRun: params.DRY_RUN,
+						managerUrlID: managerUrlID,
+						managerRpmUrl: managerRpmUrl,
+						managerRpmRepoUrl: managerRpmRepoUrl,
+						managerDebUrl: managerDebUrl,
+						managerDebListUrl: managerDebListUrl,
+					)
+
+					artifact.addLineToBuildMetadataFile("centos-rpm-repo-url", managerRpmRepoUrl)
+					artifact.addLineToBuildMetadataFile("unified-deb-repo-url", managerDebListUrl)
+					artifact.addLineToBuildMetadataFile("manager-version", managerVersion)
+					artifact.addLineToBuildMetadataFile("manager-release", managerRelease)
+					artifact.publishMetadataFile()
+				}
+			}
+		}
+
+		stage ('Promote to latest') {
+			when {
+				expression {! params.SKIP_PROMOTE_LATEST}
+			}
+			steps {
+				script {
+					artifact.promoteNightlyLatest(params.DRY_RUN, managerRpmUrl)
+					artifact.promoteNightlyLatest(params.DRY_RUN, managerDebUrl)
+				}
+			}
+		}
+
+		stage ('Publish Docker') {
+			steps {
+				script {
+					String managerDockerVersion = general.runOrDryRunShOutput(params.DRY_RUN, "cat ${gitProperties.scyllaManagerCheckoutDir}/dist/manager_build.log | grep scylladb | sed 's/.*.://' | head -n1", "Get Docker image version from log file")
+					echo "managerDockerVersion: $managerDockerVersion"
+					build.publishManagerDocker (managerDockerVersion, params.DRY_RUN)
+				}
+			}
+		}
+
+		stage ('Trigger Downstream Jobs') {
+			when {
+				expression { !params.DRY_RUN && (params.RUN_DEB_BASED_DOWNSTREAM_JOBS || params.RUN_RPM_BASED_DOWNSTREAM_JOBS) }
+			}
+			steps {
+				script {
+					if (params.RUN_RPM_BASED_DOWNSTREAM_JOBS) {
+						managerRpmRepoUrl = general.addHttpPrefixIfMissing(managerRpmRepoUrl)
+						jenkins.runBuilds(dryRun: params.DRY_RUN,
+							waitForLongBuilds: false,
+							failIfCallFailed: false,
+							buildShouldCallDependentJobs: false,
+							buildsToRun: branchProperties.qaTestsForRpmBasedBuild,
+							relengRepo: relengRepo,
+							relengBranch: relengBranch,
+							calledBuildsDir: calledBuildsDir,
+							managerAgentRepoListUrl: managerRpmRepoUrl,
+							scyllaManagerPackage: scyllaManagerPackage,
+						)
+					}
+
+					if (params.RUN_DEB_BASED_DOWNSTREAM_JOBS) {
+						managerDebListUrl = general.addHttpPrefixIfMissing(managerDebListUrl)
+						jenkins.runBuilds(dryRun: params.DRY_RUN,
+							waitForLongBuilds: false,
+							failIfCallFailed: false,
+							buildShouldCallDependentJobs: false,
+							buildsToRun: branchProperties.qaTestsForDebBasedBuild,
+							relengRepo: relengRepo,
+							relengBranch: relengBranch,
+							calledBuildsDir: calledBuildsDir,
+							managerAgentRepoListUrl: managerDebListUrl,
+							scyllaManagerPackage: scyllaManagerPackage,
+						)
+					}
+				}
+			}
+		}
+	}
+
+	post {
+		//Order is: always, changed, fixed, regression, aborted, failure, success, unstable, and cleanup.
+		always {
+			script {
+				if (binding.hasVariable('initPipelineDone')) {
+					mail.mailIfError("${devAddress}", "${currentBuild.currentResult}: $jobTitle", "${currentBuild.currentResult}: ${jobTitle}: $logText")
+					git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+				} else if (!(JOB_NAME.contains("releng-testing") || params.DRY_RUN || params.DEBUG_MAIL)) {
+					mail (
+						to: "releng@scylladb.com",
+						subject: "${currentBuild.currentResult}: ${env.JOB_NAME} [${env.BUILD_NUMBER}]",
+						body: "${env.JOB_NAME} [${env.BUILD_NUMBER}] ${currentBuild.currentResult} at the very beginning. Please see Jenkins logs for details"
+					)
+				}
+			}
+		}
+
+		fixed {
+			script {
+				mail.mailFixed("${devAddress}", "Fixed ${currentBuild.currentResult}: $jobTitle", "Fixed ${currentBuild.currentResult}: ${jobTitle}: $logText")
+			}
+		}
+	}
+}

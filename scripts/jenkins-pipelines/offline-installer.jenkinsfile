@@ -1,0 +1,218 @@
+#!groovy
+// Pipeline offline-installer
+// In order to debug, set branch on Jenkins job pipeline section and /or parameter with value of the debug branch.
+// Parameter is used to run sh scripts, pipeline to checkout the pipeline and groovy functions.
+// It is needed to be hard coded on pipeline, to enable each job to take its value of the branch,
+// otherwise - value is deleted / get hte same value from the pipeline code each time it runs.
+// example: refs/heads/build-pipeline-into-scm
+// If you work on a fork, also set the RELENG_REPO with your fork such as git@github.com:hagitsegev/scylla-pkg or
+// use the default repo of git@github.com:scylladb/scylla-pkg or git@github.com:scylladb/scylla-enterprise-pkg
+
+
+Map modules = [:]
+pipeline {
+	parameters {
+		// Optional
+		string(name: 'ARTIFACT_SOURCE_JOB_NAME', defaultValue: '', description: 'Build path to take Relocatable data from. Use this with the Build ID to get reloc from jenkins')
+		string(name: 'ARTIFACT_SOURCE_BUILD_NUM', defaultValue: '', description: 'Build ID to take reloc from. Leave empty to use last available build.')
+		string(name: 'ARTIFACT_WEB_URL', defaultValue: 'latest', description: 'URL to take reloc items from. Use when reloc is not available on jenkins, or when running on AWS, which will download faster from S3.')
+		string(name: 'RELENG_REPO', defaultValue: '', description: 'Branch of pkg repo or fork. If empty - will take scylla-pkg repo (examples: git@github.com:scylladb/scylla-pkg, git@github.com:scylladb/scylla-enterprise-pkg, git@github.com:hagitsegev/scylla-pkg)')
+		string(name: 'RELENG_BRANCH', defaultValue: '', description: 'Branch of pkg repo. If empty - will take master branch (master, branch-3.1)')
+		booleanParam(name: 'SKIP_PROMOTE_LATEST', defaultValue: false, description: 'Set to skip promote to latest - for debug use')
+		booleanParam(name: 'DRY_RUN', defaultValue: false, description: 'Set to test the pipeline code')
+		booleanParam(name: 'PRESERVE_WORKSPACE', defaultValue: false, description: 'Set to avoid cleaning workspace before and after run, for debug needs')
+		booleanParam(name: 'DEBUG_MAIL', defaultValue: false, description: 'Set to send mails to requester only')
+	}
+
+	agent {
+		label {
+			label "built-in"
+		}
+	}
+
+	environment {
+		AWS_ACCESS_KEY_ID     = credentials('jenkins2-aws-secret-key-id')
+		AWS_SECRET_ACCESS_KEY = credentials('jenkins2-aws-secret-access-key')
+	}
+
+	options {
+		disableConcurrentBuilds()
+		timeout(time: 6, unit: 'HOURS')
+		buildDiscarder(
+			logRotator(
+				numToKeepStr: '10',
+				daysToKeepStr: env.JOB_NAME.contains("releng-testing") ? '14': ''
+			)
+		)
+	}
+
+	stages {
+		stage ('Prepare') {
+			steps {
+				script {
+					generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+					general = load "${generalProperties.groovyPath}/general.groovy"
+					general.initPipeline()
+					artifactSourceJob = params.ARTIFACT_SOURCE_JOB_NAME ?: "${branchProperties.calledBuildsDir}${branchProperties.relocUploaderJobName}"
+					(qaJobProvisionType, qaNodesPostBehaviorType) = jenkins.setQAJobParameters()
+					artifactSourceJobNum = params.ARTIFACT_SOURCE_BUILD_NUM ?: Jenkins.instance.getItemByFullName(artifactSourceJob).lastSuccessfulBuild.number.toString()
+					paramArtifactWebUrl = params.ARTIFACT_WEB_URL ?: "latest"
+					cloudUrl = artifact.getLastSuccessfulUrl (
+						artifactWebUrl: paramArtifactWebUrl,
+						artifactSourceJob: artifactSourceJob,
+						artifactSourceJobNum: artifactSourceJobNum,
+						fieldName: "rpm-deb-pack-url:"
+					)
+					downloadFromCloud = true
+					unifiedPackUrl = artifact.fetchMetadataValue (
+						downloadFromCloud: downloadFromCloud,
+						artifactSourceJob: artifactSourceJob,
+						artifactSourceJobNum: artifactSourceJobNum,
+						cloudUrl: cloudUrl,
+						fieldName: "unified-pack-url:"
+					)
+					unifiedPackHttpUrl = general.addHttpPrefixIfMissing(unifiedPackUrl)
+				}
+			}
+		}
+
+		stage ('Call Mandatory Tests') {
+			steps {
+				script {
+					String artifactTestsString = "${branchProperties.mandatoryCentOsOfflineNonRootTests},"
+					artifactTestsString += "${branchProperties.qaCentosRpmNonRootArtifacts},"
+					artifactTestsString += "${branchProperties.mandatoryUnifiedDebOfflineNonRootTests}"
+					runJobsSerial=false
+					runTests (artifactTestsString, runJobsSerial)
+				}
+			}
+		}
+
+		stage ('Promote to latest') {
+			when {
+				expression {! params.SKIP_PROMOTE_LATEST}
+			}
+
+			steps {
+				script {
+					relocPackUrl = artifact.fetchMetadataValue (
+						downloadFromCloud: downloadFromCloud,
+						artifactSourceJob: artifactSourceJob,
+						artifactSourceJobNum: artifactSourceJobNum,
+						cloudUrl: cloudUrl,
+						fieldName: "reloc-pack-url:"
+					)
+					artifact.promoteNightlyLatest(params.DRY_RUN, relocPackUrl)
+				}
+			}
+		}
+		stage ('Call More Tests') {
+			steps {
+				script {
+					String artifactTestsString = "${branchProperties.qaCentosRpmOfflineInstallArtifacts},"
+					artifactTestsString += "${branchProperties.qaUnifiedDebNonRootArtifacts},"
+					artifactTestsString += "${branchProperties.qaUnifiedDebOfflineInstallArtifacts}"
+					runJobsSerial=true
+					runTests (artifactTestsString, runJobsSerial)
+				}
+			}
+		}
+	}
+
+	post {
+	//Order is: always, changed, fixed, regression, aborted, failure, success, unstable, and cleanup.
+		always {
+			script {
+				if (binding.hasVariable('initPipelineDone')) {
+					mail.mailIfError("${devAddress}", "${currentBuild.currentResult}: $jobTitle", "${currentBuild.currentResult}: ${jobTitle}: $logText")
+					git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+				} else if (!(JOB_NAME.contains("releng-testing") || params.DRY_RUN || params.DEBUG_MAIL)) {
+					mail (
+						to: "releng@scylladb.com",
+						subject: "${currentBuild.currentResult}: ${env.JOB_NAME} [${env.BUILD_NUMBER}]",
+						body: "${env.JOB_NAME} [${env.BUILD_NUMBER}] ${currentBuild.currentResult} at the very beginning. Please see Jenkins logs for details"
+					)
+					cleanWs()
+				} else {
+					cleanWs()
+				}
+			}
+		}
+
+		fixed {
+			script {
+				mail.mailFixed("${devAddress}", "Fixed ${currentBuild.currentResult}: $jobTitle", "Fixed ${currentBuild.currentResult}: ${jobTitle}: $logText")
+			}
+		}
+	}
+}
+
+def runTests (String artifactTestsString, boolean runJobsSerial=false) {
+	boolean nonRoot = false
+	boolean testFailed = false
+	String failedTests = ""
+	if (params.DRY_RUN) {
+		runJobsSerial=true
+	}
+	echo "runTests: artifactTestsString: |$artifactTestsString|"
+	ArrayList artifactTestsList = artifactTestsString.split('\\,')
+	// TODO this ability to run the tests serially is a workaround till
+	// https://github.com/scylladb/scylla-cluster-tests/issues/3356 is solved.
+	if (runJobsSerial) {
+		artifactTestsList.each { artifactTest ->
+			boolean currentTestFailed = runATest (artifactTest)
+			if (currentTestFailed) {
+				testFailed = true
+				failedTests += "${artifactTest}, "
+			}
+		}
+	} else {
+		def parallelArtifacts = [:]
+		artifactTestsList.each { artifactTest ->
+			parallelArtifacts[artifactTest] = { ->
+				boolean currentTestFailed = runATest (artifactTest)
+				if (currentTestFailed) {
+					testFailed = true
+					failedTests += "${artifactTest}, "
+				}
+			}
+		}
+		parallel parallelArtifacts
+	}
+	if (testFailed) {
+		error("Some test job(s) were not success (on $calledBuildsDir): $failedTests Check log for details")
+	}
+}
+
+boolean runATest (String test2Run) {
+	// Simple helper function for runTests. Depends on its variables as globals
+	boolean nonRoot = false
+	boolean testFailed = false
+
+	if (jenkins.jobEnabled("$calledBuildsDir${test2Run}")) {
+		if (params.DRY_RUN) {
+			echo "dryRun: call $calledBuildsDir${test2Run}"
+		} else {
+			if (test2Run.contains("nonroot")) {
+				nonRoot = true
+			}
+			def jobResult=build job: "$calledBuildsDir${test2Run}",
+			parameters: [
+				[$class: 'StringParameterValue', name: 'scylla_repo', value: ""],
+				[$class: 'StringParameterValue', name: 'provision_type', value: qaJobProvisionType],
+				[$class: 'StringParameterValue', name: 'post_behavior_db_nodes', value: qaNodesPostBehaviorType],
+				[$class: 'StringParameterValue', name: 'unified_package', value: unifiedPackHttpUrl],
+				[$class: 'BooleanParameterValue', name: 'nonroot_offline_install', value: nonRoot],
+			],
+			propagate: false,
+			wait: true
+
+			String jobStatus = jobResult.getResult()
+			echo "Job status: |$jobStatus|"
+			if (jobStatus != "SUCCESS") {
+				testFailed=true
+			}
+		}
+	}
+	return testFailed
+}

@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+
+import boto3
+import argparse
+import re
+from dateutil.parser import parse
+import datetime
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--filter', required=True, type=str, help='get filter from user')
+parser.add_argument('--dry_run', action='store_true', help='dry run')
+parser.add_argument('--region', default='ALL', type=str, help="AWS region to delete EC2 AMIs from")
+parser.add_argument('--age', type=int, default=1000, help="Delete EC2 AMIs that are older than the specified number of days")
+parser.add_argument('--aws_account_id', required=True, help='AWS account ID')
+args = parser.parse_args()
+
+if args.region == 'ALL':
+    client = boto3.client('ec2')
+    regions = [region['RegionName'] for region in client.describe_regions()['Regions']]
+    region_flag = 0
+else:
+    regions = [ args.region ]
+
+if args.age:
+    age = args.age
+
+# date expect format: 2015-03-16T12:47:34.000Z
+def days_old(date_str):
+    date = parse(date_str).replace(tzinfo=None)
+    diff = datetime.datetime.now() - date
+    return diff.days
+
+for region in regions:
+    print("Region: %s" % (region))
+    ec2 = boto3.client('ec2', region_name=region)
+    amis = ec2.describe_images(Owners=[args.aws_account_id], Filters=[{'Name' : 'name', 'Values' : [args.filter]}])
+    for ami in amis['Images']:
+        create_date = ami['CreationDate']
+        ami_id = ami['ImageId']
+        ami_name = ami['Name']
+        day_old = days_old(create_date)
+        if day_old > age:
+            if not args.dry_run:
+                print('deleting -> ' + ami_name + ' ' + ami_id + '  - create_date = ' + create_date)
+                # deregister the AMI
+                ec2.deregister_image(ImageId=ami_id)
+            else:
+                print('Dry Run only  ->' + ami_name + ' ' + ami_id + ' - create_date = ' + create_date)

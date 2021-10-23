@@ -1,0 +1,147 @@
+#!/bin/bash
+#
+# Copyright (C) 2019 ScyllaDB
+
+progname=$(basename $0)
+cachedir="$HOME/.${progname}.cache"
+product="scylla"
+branch="master"
+old_branch=false
+full=""
+update=""
+quiet=""
+list_s3=""
+
+help () {
+        cat <<EOF 1>&2
+${progname} - Search scylla relocatable packages information on S3
+
+Usage: ${progname} [-h] [-f] [-l] [-q] [-u] [-c cachedir] [-e] [-b branch] [-- [-opt ...]] [pattern ...]
+
+    -h             Show this help message
+    -f             Full listing of 00-Build.txt
+    -l             List matching S3 directories
+    -q             Be quiet
+    -u             Update local cache
+    -c cachedir    Use specified cache directory (default=${cachedir})
+    -e             Use to get the enterprise reloc addresses (default is open source)
+    -b branch      Give the branch you want. Example: 4.5 or 2021.1. (default: master or enterprise if you gave -e)
+    --             Seperator for specifying additional options to grep, e.g. -i
+
+To install aws cli on fedora/centos, run:
+    sudo yum install awscli
+    aws configure
+EOF
+        exit 1
+}
+
+while getopts ":flquceb:-" opt; do
+    case $opt in
+        f)
+            full=1;;
+        l)
+            list_s3=1;;
+        q)
+            quiet=1;;
+        u)
+            update=1;;
+        c)
+            cachedir="${OPTARG}";;
+        e)
+            product="scylla-enterprise";;
+        b)
+            branch="${OPTARG}";;
+        -)
+            break;;
+        *)
+            help;;
+    esac
+done
+shift $((OPTIND-1))
+
+if [ ! -d "${cachedir}" ]; then
+    update=1
+    mkdir -p ${cachedir}
+fi
+
+if [ $product = "scylla" ]; then
+    if [ $branch != "master" ]; then
+        if [ $branch = "4.2" ] || [ $branch = "4.3" ]; then
+            old_branch=true
+        fi
+        branch="branch-$branch"
+    fi
+else
+    if [ $branch = "master" ]; then
+        branch="enterprise"
+    else
+        if [ $branch = "2019.1" ] || [ $branch = "2020.1" ]; then
+            old_branch=true
+            branch="branch-$branch"
+        else
+            branch="enterprise-$branch"
+        fi
+    fi
+fi
+
+reloc_site=downloads.scylladb.com
+reloc_url="${reloc_site}/unstable/$product/$branch/relocatable"
+if $old_branch ; then
+    if [ $product = "scylla" ]; then
+        reloc_url="${reloc_site}/relocatable/unstable/$branch"
+    else
+        reloc_url="${reloc_site}/enterprise/relocatable/unstable/$branch"
+    fi
+fi
+
+cd ${cachedir}
+if [ -n "${update}" ]; then
+    echo "Updating cache (${cachedir})..." 1>&2
+    aws s3 ls --recursive --human-readable "s3://$reloc_url" | awk '/\/00-Build.txt$/ { print $NF }' > list
+    for i in $(cat list); do
+        sz=$(stat "$i" 2>/dev/null | awk '$1 == "Size:" { print $2 }')
+        test -z "$sz" -o "$sz" = 0 && {
+            mkdir -p "$(dirname $i)"
+            url="http://${reloc_site}/$i"
+            if [ -z "${quiet}" ]; then
+                echo "Downloading ${url}" 1>&2
+            fi
+            curl -s "${url}" > "$i"
+        }
+    done
+    rm list
+fi
+
+grep_opts=""
+while [[ "$1" = -* ]]; do
+    grep_opts="${grep_opts} $1"
+    shift
+done
+
+if [ $# == 0 ]; then
+    exit 0
+fi
+
+pattern=""
+sep=""
+for i in "$@"; do
+    pattern="${pattern}${sep}($i)"
+    sep="|"
+done
+
+matching=$(grep -Erl ${grep_opts} "${pattern}")
+
+for i in ${matching}; do
+    echo
+    url="${reloc_site}/$(echo $i | sed 's:/[^/]*Build.txt$::')"
+    echo "http://${url}/"
+    if [ -n "${full}" ]; then
+        cat "$i"
+    else
+        grep -E ${grep_opts} "${pattern}" "$i"
+    fi |& sed 's/^/  /'
+    if [ -n "${list_s3}" ]; then
+        echo
+        aws s3 ls --human-readable "s3://${url}/" |& awk -v url=${url} '{ printf("  %s %s %10s http://%s/%s\n", $1, $2, sprintf("%s %s", $3, $4), url, $5); }'
+    fi
+done

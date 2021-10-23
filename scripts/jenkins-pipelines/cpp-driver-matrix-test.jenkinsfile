@@ -1,0 +1,183 @@
+#!groovy
+// Pipeline cpp-driver-matrix-test
+// In order to debug, set RELENG_BRANCH on Jenkins job with value of the debug branch.
+// example: refs/heads/build-pipeline-into-scm
+
+Map modules = [:]
+pipeline {
+	parameters {
+		//Mandatory:
+		string(name: 'X86_NODE_PARAM', defaultValue: 'packager', description: 'On which node to run. Useful options: gce-qavpc,gce2-qavpc,gce4-qavpc. packager machines are slower, but could be used:loki,dgccd201,thor,ran,sif,huginn,muninn')
+		//Have defaults:
+		string(name: 'CPP_DRIVER_VERSIONS', defaultValue: '2.0', description: 'CPP driver versions to check')
+		string(name: 'CQL_CASSANDRA_VERSION', defaultValue: '3.0.8', description: 'CQL Cassandra version')
+		string(name: 'ARTIFACT_SOURCE_JOB_NAME', defaultValue: '', description: 'Build path to take artifacts from (usually next of build). Use this with ARTIFACT_SOURCE_BUILD_NUM to get reloc from jenkins, or ARTIFACT_WEB_URL to take them from cloud')
+		string(name: 'ARTIFACT_SOURCE_BUILD_NUM', defaultValue: '', description: 'Build number to take artifacts from. Leave empty to use last available build. Use with ARTIFACT_SOURCE_JOB_NAME to take artifacts from Jenkins, or ARTIFACT_WEB_URL to take them from cloud.')
+		string(name: 'ARTIFACT_WEB_URL', defaultValue: 'latest', description: 'URL to take reloc items from. Use when reloc is not available on jenkins, or when running on AWS, which will download faster from S3.')
+		string(name: 'SCYLLA_CCM_BRANCH', defaultValue: '', description: 'git branch or sha for CCM. i.e. branch-3.1, master or a sha')
+		string(name: 'CPP_DRIVER_MATRIX_REPO', defaultValue: 'git@github.com:scylladb/scylla-cpp-driver-matrix.git', description: 'git for CPP driver matrix')
+		string(name: 'CPP_DRIVER_MATRIX_BRANCH', defaultValue: '', description: 'git branch or sha for CPP driver matrix. i.e. branch-name or a sha. If empty - will take master branch')
+		// TODO: remove the releng repo and branch
+		string(name: 'RELENG_REPO', defaultValue: '', description: 'Branch of pkg repo or fork. If empty - will take scylla-pkg repo (examples: git@github.com:scylladb/scylla-pkg, git@github.com:scylladb/scylla-enterprise-pkg, git@github.com:hagitsegev/scylla-pkg)')
+		string(name: 'RELENG_BRANCH', defaultValue: '', description: 'Branch of pkg repo. If empty - will take master branch (master, branch-3.1)')
+		booleanParam(name: 'DRY_RUN', defaultValue: false, description: 'Set to test the pipeline code')
+		booleanParam(name: 'PRESERVE_WORKSPACE', defaultValue: false, description: 'Set to avoid cleaning workspace before and after run, for debug needs. If you do so - pay attention to the X86_NODE_PARAM.')
+		booleanParam(name: 'DEBUG_MAIL', defaultValue: false, description: 'Set to send mails to requester only')
+	}
+	agent {
+		label {
+			label env.X86_NODE_PARAM
+		}
+	}
+
+	environment {
+		AWS_ACCESS_KEY_ID     = credentials('jenkins2-aws-secret-key-id')
+		AWS_SECRET_ACCESS_KEY = credentials('jenkins2-aws-secret-access-key')
+	}
+
+	options {
+		disableConcurrentBuilds()
+		timeout(time: 7, unit: 'HOURS')
+		buildDiscarder(
+			logRotator(
+				numToKeepStr: '10',
+				daysToKeepStr: env.JOB_NAME.contains("releng-testing") ? '14': ''
+			)
+		)
+	}
+
+	stages {
+
+		stage ('Prepare') {
+			steps {
+				script {
+					generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+					general = load "${generalProperties.groovyPath}/general.groovy"
+					general.initPipeline()
+
+					artifactSourceJob = params.ARTIFACT_SOURCE_JOB_NAME ?: "${branchProperties.calledBuildsDir}${branchProperties.relocUploaderJobName}"
+					cppDriverScyllaTestDone = false
+					cppDriverDatastaxTestDone = false
+					buildMode = "release"
+					artifactSourceJobNum = params.ARTIFACT_SOURCE_BUILD_NUM ?: Jenkins.instance.getItemByFullName(artifactSourceJob).lastSuccessfulBuild.number.toString()
+					paramArtifactWebUrl = params.ARTIFACT_WEB_URL ?: "latest"
+					cloudUrl = artifact.getLastSuccessfulUrl (
+						artifactWebUrl: paramArtifactWebUrl,
+						artifactSourceJob: artifactSourceJob,
+						artifactSourceJobNum: artifactSourceJobNum,
+						fieldName: "reloc-pack-url:"
+					)
+				}
+			}
+		}
+
+		stage('Checkout') {
+			steps {
+				script {
+					ccmBranch = params.SCYLLA_CCM_BRANCH ?: branchProperties.stableBranchName
+					cppDriverMatrixBranch = params.CPP_DRIVER_MATRIX_BRANCH ?: branchProperties.stableQABranchName
+					cppDriverMatrixRepoUrl = params.CPP_DRIVER_MATRIX_REPO ?: generalProperties.cppDriverMatrixRepoUrl
+					cppDriverDatastaxCheckoutDir = "cpp-driver-datastax"
+					cppDriverScyllaCheckoutDir = "cpp-driver-scylla"
+
+					git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+					git.checkoutToDir (relengRepo, relengBranch, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+					git.checkoutToDir (cppDriverMatrixRepoUrl, cppDriverMatrixBranch, generalProperties.cppDriverMatrixCheckoutDir)
+					git.checkoutToDir (gitProperties.scyllaCcmRepoUrl, ccmBranch, gitProperties.scyllaCcmCheckoutDir)
+					git.checkoutToDir ("https://github.com/datastax/cpp-driver.git", "master", cppDriverDatastaxCheckoutDir)
+					git.checkoutToDir ("https://github.com/scylladb/cpp-driver.git", "master", cppDriverScyllaCheckoutDir)
+					general.lsPath(WORKSPACE)
+				}
+			}
+		}
+
+		stage('Copy Artifacts') {
+			steps {
+				script {
+					artifact.getRelocArtifacts (
+						buildMode: buildMode,
+						cloudUrl: cloudUrl,
+						architecture: branchProperties.x86ArchName,
+					)
+				}
+			}
+		}
+
+		stage('CPP Driver Matrix Test(datastax)') {
+			steps {
+				catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+					script {
+						cppDriverDatastaxTestDone = true
+						test.doCPPDriverMatrixTest (
+							dryRun: params.DRY_RUN,
+							driverCheckoutDir: "$WORKSPACE/$cppDriverDatastaxCheckoutDir",
+							driverType: "datastax",
+							cppDriverVersions: params.CPP_DRIVER_VERSIONS,
+							cqlCassandraVersion: params.CQL_CASSANDRA_VERSION,
+							architecture: branchProperties.x86ArchName,
+						)
+					}
+				}
+			}
+		}
+		stage('CPP Driver Matrix Test(scylla)') {
+			steps {
+				catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+					script {
+						cppDriverScyllaTestDone = true
+						test.doCPPDriverMatrixTest (
+							dryRun: params.DRY_RUN,
+							driverCheckoutDir: "$WORKSPACE/$cppDriverScyllaCheckoutDir",
+							driverType: "scylla",
+							cppDriverVersions: params.CPP_DRIVER_VERSIONS,
+							cqlCassandraVersion: params.CQL_CASSANDRA_VERSION,
+							architecture: branchProperties.x86ArchName,
+						)
+					}
+				}
+			}
+		}
+	}
+
+	post {
+		//Order is: always, changed, fixed, regression, aborted, failure, success, unstable, and cleanup.
+		always {
+			script {
+				if (binding.hasVariable('initPipelineDone')) {
+					if ((cppDriverDatastaxTestDone || cppDriverScyllaTestDone) && ! params.DRY_RUN) {
+						publishStatus = artifact.publishArtifactsStatus("*/log/TEST-*.xml", WORKSPACE)
+						publishStatus = artifact.publishArtifactsStatus("$gitProperties.cppDriverMatrixCheckoutDir/summary.log", WORKSPACE)
+
+						xunit thresholds: [failed(unstableThreshold: '1'), skipped()],
+						tools: [GoogleTest(pattern: '*/log/TEST-*.xml')]
+
+						if (publishStatus) {
+							error("Could not publish some item(s). See log for details")
+							logText += "\nCould not publish some item(s). See log for details"
+							if (currentBuild.currentResult != "ABORTED") {
+								currentBuild.result = 'FAILURE'
+							}
+						}
+					}
+					mail.mailIfError(devAddress, "${currentBuild.currentResult}: $jobTitle", "${currentBuild.currentResult}: ${jobTitle}: $logText")
+					git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+				} else if (!(JOB_NAME.contains("releng-testing") || params.DRY_RUN || params.DEBUG_MAIL)) {
+					mail (
+						to: "releng@scylladb.com",
+						subject: "${currentBuild.currentResult}: ${env.JOB_NAME} [${env.BUILD_NUMBER}]",
+						body: "${env.JOB_NAME} [${env.BUILD_NUMBER}] ${currentBuild.currentResult} at the very beginning. Please see Jenkins logs for details"
+					)
+					cleanWs()
+				} else {
+					cleanWs()
+				}
+			}
+		}
+
+		fixed {
+			script {
+				mail.mailFixed(devAddress, "Fixed ${currentBuild.currentResult}: $jobTitle", "Fixed ${currentBuild.currentResult}: ${jobTitle}: $logText")
+			}
+		}
+	}
+}

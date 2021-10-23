@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+
+import argparse
+import github
+import git
+import re
+import requests
+
+def find_issues(git_repo, prev_commit, curr_commit):
+    keywords = [
+        'close', 'closes', 'closed',
+        'fix', 'fixes', 'fixed',
+        'resolve', 'resolves', 'resolved'
+    ]
+
+    g = git.Git(git_repo)
+    loginfo = g.log("%s..%s" % (prev_commit, curr_commit))
+    raw_issues = re.findall(rf"({'|'.join(keywords)})\s*(:|-)?\s*[\w/:]*\#(\d+)", loginfo, re.IGNORECASE)
+    issues = [int(x[2]) for x in raw_issues]
+    issues = sorted(set(issues))
+    return issues
+
+def issue_open_source_url(issue_id, arg_org_repo):
+    issue_url = github_base_url + arg_org_repo + "/issues/" + str(issue_id)
+    return issue_url
+
+def issue_valid_url(issue_url):
+    request = requests.get(issue_url)
+
+    if request.status_code != 200:
+        issue_url = ""
+
+    return issue_url
+
+def print_issue_details(issue_id, repo_name, repo_object):
+    url = issue_open_source_url(issue_id, organization + "/" + repo_name)
+    valid_url = issue_valid_url(url)
+    if valid_url == "":
+        print ("- Warning: Could not get data for |%d| %s (tried: %s)" %
+          (issue_id, repos_text, url))
+    else:
+        issue = repo_object.get_issue(issue_id)
+        print("- %s: %s %s%s/%s/issues/%d" %
+          (repo_name, issue.title, github_base_url, organization, repo_name, issue.number))
+
+
+def print_gh_issues_details(gh_access_token, given_git_repo, open_source_repository_name, issues):
+    gh = github.Github(gh_access_token)
+    org = gh.get_organization(organization)
+    arg_repo = org.get_repo(given_git_repo)
+    if reporting_enterprise_repo:
+        open_source_repo = org.get_repo(open_source_repository_name)
+
+    for issue_id in issues:
+        if reporting_enterprise_repo:
+            try:
+                issue = arg_repo.get_issue(issue_id)
+            except:
+                print_issue_details(issue_id, open_source_repository_name, open_source_repo)
+            else:
+                print("- %s: %s %s%s/%s/issues/%d" %
+                  (given_git_repo, issue.title, github_base_url, organization, given_git_repo, issue.number))
+
+        else:
+            print_issue_details(issue_id, open_source_repository_name, arg_repo)
+
+def print_no_gh_issues_details(given_git_repo, issues):
+    if reporting_enterprise_repo:
+        print ("No github access key was given to get Enterprise issues, so these items can be of Enterprise or of Open Source")
+        for issue_id in issues:
+            print ("- issue (of Open Source or Enterprise): " + str(issue_id))
+
+    else:
+        for issue_id in issues:
+            url = issue_open_source_url(issue_id, organization + "/" + given_git_repo)
+            valid_url = issue_valid_url(url)
+            if valid_url == "":
+                print ("- %d: (not found on %s, tried: %s)" %
+                  (issue_id, given_git_repo, url))
+            else:
+                print ("- %s: %s" %
+                  (given_git_repo, valid_url))
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Generate release notes.')
+    parser.add_argument('--prev-commit', type=str,
+                       help='git commit for previous release')
+    parser.add_argument('--curr-commit', type=str,
+                       help='git commit for current release')
+    parser.add_argument('--gh-access-token', type=str,
+                        help='GitHub access token for fancy release notes')
+    parser.add_argument('--git-repo', type=str,
+                        help='GitHub repository name for fancy release notes, such as scylla or scylla-enterprise')
+    args = parser.parse_args()
+
+    github_base_url = "https://github.com/"
+    organization = "scylladb"
+    enterprise_substring = "-enterprise"
+    open_source_repository_name = args.git_repo.replace(enterprise_substring, '')
+    # When we check enterprise, issues could bome from Scylla too, so if we didn't find the issue on enterprise - check it on Scylla
+    reporting_enterprise_repo = ("enterprise" in args.git_repo)
+
+    if reporting_enterprise_repo:
+        repos_text = "on repos " + args.git_repo + " and " + open_source_repository_name
+        repo_dir = args.git_repo.replace('-enterprise','')
+    else:
+        repos_text = "on repo " + args.git_repo
+        repo_dir = args.git_repo
+
+    print ("Fixes " + repos_text)
+
+    issues = find_issues(repo_dir, args.prev_commit, args.curr_commit)
+
+    if args.gh_access_token:
+        print_gh_issues_details(args.gh_access_token, args.git_repo, open_source_repository_name, issues)
+
+    else:
+        print_no_gh_issues_details(args.git_repo, issues)

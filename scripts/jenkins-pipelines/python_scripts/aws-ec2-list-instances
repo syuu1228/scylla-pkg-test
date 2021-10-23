@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+
+import boto3
+import argparse
+import re
+
+keys = ['id', 'name', 'state']
+
+parser = argparse.ArgumentParser()
+parser.add_argument('-n', '--noheader', action='store_true', help='disable printing of header')
+parser.add_argument('--sort',      choices=keys, help='primary sort key')
+parser.add_argument('--secondary', choices=keys, help='secondary sort key')
+parser.add_argument('--id', '--instance-id')
+parser.add_argument('--name', '--instance-name')
+parser.add_argument('--rname', help='instance name regular expression')
+parser.add_argument('--region', help='Choose region')
+args = parser.parse_args()
+
+if args.rname:
+	rname = re.compile(args.rname)
+else:
+	rname = None
+
+sort_key_dict = {}
+for i in range(len(keys)):
+	sort_key_dict[keys[i]] = i
+
+if args.sort:
+	primary_key = sort_key_dict[args.sort]
+else:
+	primary_key = sort_key_dict['name']
+if args.secondary:
+	secondary_key = sort_key_dict[args.secondary]
+else:
+	secondary_key = None
+if args.region:
+	regions = [args.region]
+else:
+	client = boto3.client('ec2')
+	regions = [region['RegionName'] for region in client.describe_regions()['Regions']]
+
+def cmp_records(x, y):
+	if x[primary_key] < y[primary_key]:
+		return -1
+	elif x[primary_key] > y[primary_key]:
+		return 1
+	elif secondary_key:
+		if x[secondary_key] < y[secondary_key]:
+			return -1
+		elif x[secondary_key] > y[secondary_key]:
+			return 1
+
+	return 0
+for x in regions:
+	ec2 = boto3.client('ec2', region_name=x)
+
+	res = ec2.describe_instances()
+
+	fmt = '{:20} {:55} {:15} {:15} {:15}'
+#	if not args.noheader:
+#		print fmt.format('InstanceID', 'Name', 'State', 'PublicIp', 'PrivateIp')
+#		print fmt.format('--------------------', '-----------------------------------------------------', '---------------', '---------------', '---------------')
+
+	output = []
+	for i in range(len(res['Reservations'])):
+		insts = res['Reservations'][i]['Instances']
+		for j in range(len(insts)):
+			inst = insts[j]
+			i_id = inst['InstanceId']
+			if args.id and i_id != args.id:
+				continue
+			i_state = inst['State']['Name']
+			i_name = ''
+			i_pub = ''
+			i_priv = ''
+			for tag in inst['Tags']:
+				if tag['Key'] == 'Name' and 'Value' in tag:
+					i_name = tag['Value']
+					break
+			if rname and not re.match(rname, i_name):
+				continue
+			if args.name and i_name != args.name:
+				continue
+			if i_state == 'running':
+				for ifc in inst['NetworkInterfaces']:
+					i_priv = ifc['PrivateIpAddress']
+					assoc = ifc['Association']
+					if assoc:
+						i_pub = assoc['PublicIp']
+						break
+			output.append( (i_id, i_name, i_state, i_pub, i_priv) )
+
+	for i in sorted(output, cmp=cmp_records):
+		print fmt.format(i[0], i[1], i[2], i[3], i[4])

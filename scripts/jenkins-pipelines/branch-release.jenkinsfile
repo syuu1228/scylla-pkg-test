@@ -1,0 +1,220 @@
+#!groovy
+// Pipeline branch-release
+
+pipeline {
+	parameters {
+		//Mandatory:
+		choice(name: 'PRODUCT', choices: ['scylla', 'scylla-manager'])
+		string(name: 'NODE_PARAM', defaultValue: 'packager', description: 'On which node to run. Useful options: packager,loki,dgccd201,thor,ran,sif,huginn,muninn')
+		string(name: 'RELEASE', defaultValue: '', description: 'New release name. Examples: 3.0, 3.1, 2018.1 (Will create branch-RELEASE and next-RELEASE)')
+		string(name: 'NEXT_DEV_RELEASE', defaultValue: '', description: 'The expected next release we will branch. Example: If we now branch 4.4, this might be 4.5')
+		string(name: 'BASE_BRANCH', defaultValue: '', description: 'From which branch to branch the new release. Examples: branch-3.0, branch-2018.1, master')
+		//Not mandatory
+		string(name: 'GITHUB_ACCOUNT_NAME', defaultValue: 'scylladb', description: """Github account to use to create the branches (for testing purposes) ex. benipeled,
+							NOTE: The account should have a fork of the relevant repositories depending on the product (see repoString in the pipeline)."""
+		)
+		booleanParam(name: 'DRY_RUN', defaultValue: false, description: 'Set to test the pipeline code')
+		booleanParam(name: 'DEBUG_MAIL', defaultValue: false, description: 'Set to send mails to requester only')
+		booleanParam(name: 'SKIP_CREATE_BRANCH', defaultValue: false, description: 'Set to skip the creation of new branches')
+		booleanParam(name: 'SKIP_UPDATE_NEW_VERSION', defaultValue: false, description: 'Set to skip update new release version files on new branch')
+		booleanParam(name: 'SKIP_UPDATE_DEV_VERSION', defaultValue: false, description: 'Set to skip update version on dev release on master branch')
+	}
+	agent {
+		label {
+				label env.NODE_PARAM
+		}
+	}
+
+	options {
+		timestamps()
+		disableConcurrentBuilds()
+		timeout(time: 50, unit: 'MINUTES')
+		buildDiscarder(logRotator(numToKeepStr: '10'))
+	}
+
+
+	stages {
+		stage ('Prepare') {
+			steps {
+				script {
+					if (!params.BASE_BRANCH) {
+						error("Missing mandatory parameter BASE_BRANCH (the base branch for the new branch-release)")
+					}
+					generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+					general = load "${generalProperties.groovyPath}/general.groovy"
+					general.initPipeline()
+					release = load "${generalProperties.groovyPath}/release.groovy"
+
+					release.errorIfReleaseVersionIsIllegal(params.RELEASE)
+					release.errorIfReleaseVersionIsIllegal(params.NEXT_DEV_RELEASE)
+
+					nextDevRelease = "${params.NEXT_DEV_RELEASE}.dev"
+					newVersionId = "${params.RELEASE}.rc0"
+					stableDevBranchName = branchProperties.stableBranchName
+					nextDevBranchName = branchProperties.nextBranchName
+					nextNewBranchName = "next-${params.RELEASE}"
+					disableSubmodulesFlag = false
+					productName = params.PRODUCT
+					githubAccountUrl = "git@github.com:${params.GITHUB_ACCOUNT_NAME}/"
+					if (productName == 'scylla') {
+						stableNewBranchName = "branch-${params.RELEASE}"
+						repoString = branchProperties.releaseGitRepositories
+						createBranchMessage = "Creating $stableNewBranchName and $nextNewBranchName from ${params.BASE_BRANCH}"
+					} else if (productName == 'scylla-manager') {
+						managerProperties = readProperties file: 'scripts/jenkins-pipelines/manager/branch-specific.properties'
+						stableNewBranchName = "manager-${params.RELEASE}"
+						repoString = managerProperties.gitRepositories
+						createBranchMessage = "Creating $stableNewBranchName from ${params.BASE_BRANCH}"
+					}
+				}
+			}
+		}
+		stage('Create Branches') {
+			when {
+				expression {!params.SKIP_CREATE_BRANCH}
+			}
+			steps {
+				script {
+					git.cleanWorkSpaceUponRequest()
+					ArrayList repoList = repoString.split('\\,')
+					repoList.each { repo ->
+						repoUrl = "${githubAccountUrl}${repo}.git"
+						disableSubmodulesFlag = repoUrl.contains("-pkg") ?: false
+						if ((!repoUrl.contains("driver_matrix")) || (!repoUrl.contains("cluster_tests")) || (!repoUrl.contains("artifact_tests"))) {
+							git.checkoutToDir (repoUrl, params.BASE_BRANCH, repo, disableSubmodulesFlag)
+							git.configureUserMail(repo)
+							dir (repo) {
+								sshagent(['github-promoter']) {
+									echo "$createBranchMessage on repo $repo"
+									sh "git checkout -b $stableNewBranchName"
+									general.runOrDryRunSh(params.DRY_RUN, "git push origin $stableNewBranchName", "Push new stable branch")
+									if (productName == 'scylla') {
+										sh "git checkout -b $nextNewBranchName"
+										general.runOrDryRunSh(params.DRY_RUN, "git push origin $nextNewBranchName", "Push new next branch")
+									}
+								}
+							}
+						}
+					};
+				}
+			}
+		}
+		stage('Checkout') {
+			when {
+				expression {!params.SKIP_UPDATE_NEW_VERSION || !params.SKIP_UPDATE_DEV_VERSION}
+			}
+			steps {
+				script {
+					repoUrl = "${githubAccountUrl}${productName}.git"
+					if (productName == 'scylla') {
+						// Checkout scylla and scylla-machine-image repositories
+						git.checkoutToDir (repoUrl, nextNewBranchName, repoName, disableSubmodulesFlag)
+
+						repoName="${productName}-machine-image"
+						repoUrl = "${githubAccountUrl}${repoName}.git"
+						git.checkoutToDir (repoUrl, nextNewBranchName, repoName, disableSubmodulesFlag)
+					} else if (productName == 'scylla-manager') {
+						// Checkout scylla-manager repository
+						git.checkoutToDir (repoUrl, stableNewBranchName, repoName, disableSubmodulesFlag)
+					}
+				}
+			}
+		}
+
+		stage('Update new branch version') {
+			when {
+				expression {!params.SKIP_UPDATE_NEW_VERSION}
+			}
+			steps {
+				script {
+					if (productName == 'scylla') {
+						release.updateVersionFile (
+							repoCheckoutDir: gitProperties.scyllaCheckoutDir,
+							dryRun: params.DRY_RUN,
+							updateDockerUrl: true,
+							versionId: newVersionId,
+							releaseName: params.RELEASE,
+							nextBranch: nextNewBranchName,
+							stableBranch: stableNewBranchName,
+						)
+						release.updateVersionFile (
+							repoCheckoutDir: gitProperties.scyllaMachineImageCheckoutDir,
+							dryRun: params.DRY_RUN,
+							versionId: newVersionId,
+							nextBranch: nextNewBranchName,
+							stableBranch: stableNewBranchName,
+						)
+					} else if (productName == 'scylla-manager') {
+						release.updateVersionFile (
+							repoCheckoutDir: gitProperties.scyllaManagerCheckoutDir,
+							dryRun: params.DRY_RUN,
+							versionId: newVersionId,
+							releaseName: params.RELEASE,
+							stableBranch: stableNewBranchName,
+							versionFilePath: managerProperties.versionFileName,
+						)
+					}
+				}
+			}
+		}
+
+		stage('Update dev branch version') {
+			when {
+				expression {!params.SKIP_UPDATE_DEV_VERSION}
+			}
+			steps {
+				script {
+					if (productName == 'scylla') {
+						release.updateVersionFile (
+							repoCheckoutDir: gitProperties.scyllaCheckoutDir,
+							dryRun: params.DRY_RUN,
+							pushToSpecificBranch: nextDevBranchName,
+							versionId: nextDevRelease,
+							nextBranch: nextDevBranchName,
+							stableBranch: stableDevBranchName,
+						)
+						release.updateVersionFile (
+							repoCheckoutDir: gitProperties.scyllaMachineImageCheckoutDir,
+							dryRun: params.DRY_RUN,
+							pushToSpecificBranch: nextDevBranchName,
+							versionId: nextDevRelease,
+							nextBranch: nextDevBranchName,
+							stableBranch: stableDevBranchName,
+						)
+					} else if (productName == 'scylla-manager') {
+						release.updateVersionFile (
+							repoCheckoutDir: gitProperties.scyllaManagerCheckoutDir,
+							pushToSpecificBranch: stableDevBranchName,
+							dryRun: params.DRY_RUN,
+							versionId: nextDevRelease,
+							releaseName: params.RELEASE,
+							stableBranch: stableDevBranchName,
+							versionFilePath: managerProperties.versionFileName,
+						)
+					}
+				}
+			}
+		}
+	}
+
+	post {
+		//Order is: always, changed, fixed, regression, aborted, failure, success, unstable, and cleanup.
+		always {
+			script {
+				if (binding.hasVariable('initPipelineDone')) {
+					mail.mailResults("$relengAddress", "${currentBuild.currentResult}: $jobTitle", "New branches created. Please create properties file on pkg repo, and run rc-0")
+					git.cleanWorkSpaceUponRequest()
+				} else if (!(JOB_NAME.contains("releng-testing") || params.DRY_RUN || params.DEBUG_MAIL)) {
+					mail (
+						to: "releng@scylladb.com",
+						subject: "${currentBuild.currentResult}: ${env.JOB_NAME} [${env.BUILD_NUMBER}]",
+						body: "${env.JOB_NAME} [${env.BUILD_NUMBER}] ${currentBuild.currentResult} at the very beginning. Please see Jenkins logs for details"
+					)
+					cleanWs()
+				} else {
+					cleanWs()
+				}
+			}
+		}
+	}
+}

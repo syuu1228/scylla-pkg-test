@@ -1,0 +1,485 @@
+#!groovy
+// Pipeline ami
+// In order to debug, set branch on Jenkins job pipeline section and /or parameter with value of the debug branch.
+// Parameter is used to run sh scripts, pipeline to checkout the pipeline and groovy functions.
+// It is needed to be hard coded on pipeline, to enable each job to take its value of the branch,
+// otherwise - value is deleted / get hte same value from the pipeline code each time it runs.
+// example: refs/heads/build-pipeline-into-scm
+// If you work on a fork, also set the RELENG_REPO with your fork such as git@github.com:hagitsegev/scylla-pkg or
+// use the default repo of git@github.com:scylladb/scylla-pkg or git@github.com:scylladb/scylla-enterprise-pkg
+
+
+Map modules = [:]
+pipeline {
+	parameters {
+		// Mandatory:
+		string(name: 'X86_NODE_PARAM', defaultValue: 'packager', description: 'On which node to run the ami build. Useful options: packager,loki,dgccd201,thor,ran,huginn,muninn.')
+		string(name: 'SCYLLA_BRANCH', defaultValue: '', description: 'Branch of scylla repo, used for tag info. If empty - will take stable branch')
+		string(name: 'MACHINE_IMAGE_BRANCH', defaultValue: '', description: 'Branch for ami. If empty - will take stable branch (master)')
+		string(name: 'MACHINE_IMAGE_REPO', defaultValue: '', description: 'Repo for ami. If empty - will take scylla repo')
+		choice(name: 'OS_DISTRO', choices: ['ubuntu:20.04', 'centos:7'], description: 'Choose on which OS the AMI will be build. Please note that centos:7 is kept for end cases manual use')
+		string(name: 'EC2_INSTANCE_TYPES',
+					 defaultValue: '',
+					 description: 'List of instance types, space separated. If empty, will take a list defined for the current branch. Full list: i3.large i3.xlarge i3.2xlarge i3.4xlarge i3.8xlarge i3.16xlarge i3en.large i3en.xlarge. Not always available: i3en.xlarge i3en.2xlarge i3.metal')
+		string(name: 'SOURCE_AWS_REGION', defaultValue: 'us-east-1', description: 'Location of AMI to test')
+		string(name: 'TEST_EXISTING_AMI_ID', defaultValue: '', description: 'AMI ID to test. If empty - will build a new AMI')
+		string(name: 'TESTING_AWS_REGION', defaultValue: 'eu-north-1', description: 'Copy AMI to a closer region, so tests will be faster')
+		string(name: 'COPY_AMI_TO_AWS_REGIONS', defaultValue: 'us-west-2,eu-west-2,eu-west-1,eu-central-1', description: 'Comma separated list of AMI regions to copy AMI to')
+
+		// Optional
+		string(name: 'SCYLLA_RELEASE', defaultValue: '', description: 'The scylla release such as master, enterprise, scylla-3.1. If empty - will take stable branch of the release (master)')
+		string(name: 'ARTIFACT_SOURCE_JOB_NAME', defaultValue: '', description: 'Build path to take artifacts from (usually unified-deb). Use with ARTIFACT_SOURCE_BUILD_NUM to take artifacts from Jenkins, or ARTIFACT_WEB_URL to take them from cloud.')
+		string(name: 'ARTIFACT_SOURCE_BUILD_NUM', defaultValue: '', description: 'Build number to take artifacts from. Leave empty to use last available build. Use with ARTIFACT_SOURCE_JOB_NAME to take artifacts from Jenkins, or ARTIFACT_WEB_URL to take them from cloud.')
+		string(name: 'ARTIFACT_WEB_URL', defaultValue: 'latest', description: 'URL of deb (or RPM) repo created by unified-deb (or CentOS-RPM) process. Use when not available on jenkins, or when running on AWS, which will download faster from S3.')
+		string(name: 'RELENG_REPO', defaultValue: '', description: 'Branch of pkg repo or fork. If empty - will take scylla-pkg repo (examples: git@github.com:scylladb/scylla-pkg, git@github.com:scylladb/scylla-enterprise-pkg, git@github.com:hagitsegev/scylla-pkg)')
+		string(name: 'RELENG_BRANCH', defaultValue: '', description: 'Branch of pkg repo. If empty - will take stable branch (master)')
+		booleanParam(name: 'SKIP_TEST', defaultValue: false, description: 'Set to skip ami test - for debug use')
+		booleanParam(name: 'SKIP_ADDITIONAL_TESTS', defaultValue: false, description: 'Set to skip the additional tests (relevant when SKIP_TEST is not set) - for next-machine-image')
+		booleanParam(name: 'RUN_AMI_VERSION_TAG_TEST', defaultValue: false, description: 'Set to run releng AMI version tag verification')
+		booleanParam(name: 'DRY_RUN', defaultValue: false, description: 'Set to test the pipeline code')
+		booleanParam(name: 'PRESERVE_WORKSPACE', defaultValue: false, description: 'Set to avoid cleaning workspace before and after run, for debug needs')
+		booleanParam(name: 'DEBUG_MAIL', defaultValue: false, description: 'Set to send mails to requester only')
+		booleanParam(name: 'RUN_DOWNSTREAM_JOBS', defaultValue: true, description: 'Unset this to avoid calling downstream jobs')
+	}
+
+	agent {
+		label {
+			label "built-in"
+		}
+	}
+
+	environment {
+		AWS_ACCESS_KEY_ID     = credentials('jenkins2-aws-secret-key-id')
+		AWS_SECRET_ACCESS_KEY = credentials('jenkins2-aws-secret-access-key')
+	}
+
+	options {
+		disableConcurrentBuilds()
+		timeout(time: 360, unit: 'MINUTES')
+		buildDiscarder(
+			logRotator(
+				numToKeepStr: '10',
+				daysToKeepStr: env.JOB_NAME.contains("releng-testing") ? '14': ''
+			)
+		)
+		copyArtifactPermission('*release*')
+	}
+
+	stages {
+		stage ('Prepare') {
+			steps {
+				script {
+					generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+					general = load "${generalProperties.groovyPath}/general.groovy"
+					general.initPipeline()
+					releaseName = params.SCYLLA_RELEASE ?: branchProperties.stableBranchName
+					paramArtifactWebUrl = params.ARTIFACT_WEB_URL ?: "latest"
+					machineImageRepo = params.MACHINE_IMAGE_REPO ?: gitProperties.scyllaMachineImageRepoUrl
+					machineImageBranch = params.MACHINE_IMAGE_BRANCH ?: branchProperties.stableBranchName
+					machineImageSha = git.remoteBranchSha(machineImageRepo, machineImageBranch)
+
+					amiOS = params.OS_DISTRO
+					currentBuild.description = "$amiOS Based"
+					testInstanceTypes = params.EC2_INSTANCE_TYPES ?: "${branchProperties.amiTestInstanceTypes}" // This contains spaces
+					extendedTestInstanceTypes = branchProperties.extendedAmiTestInstanceTypes
+
+					testExistingAMI = params.TEST_EXISTING_AMI_ID
+					buildNewAMI = false
+					if (!testExistingAMI) {
+						buildNewAMI = true
+					}
+					if (params.DRY_RUN) {
+						testExistingAMI = "dry-run"
+					}
+					testingAmiId = ""
+					(qaJobProvisionType, qaNodesPostBehaviorType) = jenkins.setQAJobParameters()
+				}
+			}
+		}
+
+		stage('Build AMI') {
+			steps {
+				script {
+					node(params.X86_NODE_PARAM) {
+						jenkins.checkAndTagAwsInstance(runningUserID)
+						dpackagerAwsCommand = general.setAwsDpackagerCommand ("", gitProperties.scyllaPkgCheckoutDir)
+						downloadFromCloud = true
+						echo "Checkout agent phase"
+						echo "===================="
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+						if (amiOS == "centos:7") {
+							artifactSourceJob = params.ARTIFACT_SOURCE_JOB_NAME ?: "${branchProperties.calledBuildsDir}${branchProperties.centosJobName}"
+							lastSuccessUrlFieldName = "centos-rpm-url:"
+							metadataUrlFieldName = "centos-rpm-repo-url:"
+							managerAgentRepoListUrl = branchProperties.centosManagerAgentRepoUrl
+						} else {
+							artifactSourceJob = params.ARTIFACT_SOURCE_JOB_NAME ?: "${branchProperties.calledBuildsDir}${branchProperties.unifiedDebJobName}"
+							lastSuccessUrlFieldName = "unified-deb-url:"
+							metadataUrlFieldName = "unified-deb-url:"
+							managerAgentRepoListUrl = branchProperties.ubuntuManagerAgentListUrl
+						}
+						echo "artifactSourceJob:${artifactSourceJob}"
+						echo "managerAgentRepoListUrl:${managerAgentRepoListUrl}"
+						artifactSourceJobNum = params.ARTIFACT_SOURCE_BUILD_NUM ?: Jenkins.instance.getItemByFullName(artifactSourceJob).lastSuccessfulBuild.number.toString()
+						echo "artifactSourceJobNum:${artifactSourceJobNum}"
+						osCloudUrl = artifact.getLastSuccessfulUrl (
+							artifactWebUrl: paramArtifactWebUrl,
+							artifactSourceJob: artifactSourceJob,
+							artifactSourceJobNum: artifactSourceJobNum,
+							fieldName: lastSuccessUrlFieldName
+						)
+						echo "osCloudUrl:${osCloudUrl}"
+
+						//We need it to run ami.sh script
+						git.checkoutToDir(relengRepo, relengBranch, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+						git.checkoutToDir(machineImageRepo, machineImageSha, gitProperties.scyllaMachineImageCheckoutDir)
+						agentAmiWorkDir = "$WORKSPACE/${gitProperties.scyllaMachineImageCheckoutDir}/aws/ami"
+						amiPropertiesFile = "$WORKSPACE/${generalProperties.amiIdFile}"
+						echo "agentAmiWorkDir:${agentAmiWorkDir}"
+						echo "amiPropertiesFile:${amiPropertiesFile}"
+
+						echo "Copy Artifacts"
+						echo "=============="
+						if (buildNewAMI) {
+							artifact.getAmiArtifacts(
+								downloadFromCloud: downloadFromCloud,
+								sourceUrl:  osCloudUrl,
+								artifactSourceJob: artifactSourceJob,
+								artifactSourceJobNum: artifactSourceJobNum,
+								amiOS: amiOS,
+							)
+						} else {
+							echo "No need to copy artifacts, as going to test an existing AMI |${testExistingAMI}|"
+						}
+
+						buildPackUrl = artifact.fetchMetadataValue (
+							downloadFromCloud: downloadFromCloud,
+							artifactSourceJob: artifactSourceJob,
+							artifactSourceJobNum: artifactSourceJobNum,
+							cloudUrl: osCloudUrl,
+							fieldName: "rpm-deb-pack-url:"
+						)
+						echo "buildPackUrl:${buildPackUrl}"
+
+						repoUrl = artifact.fetchMetadataValue (
+							downloadFromCloud: downloadFromCloud,
+							artifactSourceJob: artifactSourceJob,
+							artifactSourceJobNum: artifactSourceJobNum,
+							cloudUrl: osCloudUrl,
+							fieldName: metadataUrlFieldName
+						)
+						echo "repoUrl:${repoUrl}"
+
+						releaseFromMetadata = artifact.fetchMetadataValue (
+							downloadFromCloud: true,
+							cloudUrl: osCloudUrl,
+							fieldName: "scylla-release:"
+						)
+						echo "releaseFromMetadata:${releaseFromMetadata}"
+
+						versionFromMetadata = artifact.fetchMetadataValue (
+							downloadFromCloud: true,
+							cloudUrl: osCloudUrl,
+							fieldName: "scylla-version:"
+						)
+						echo "versionFromMetadata:${versionFromMetadata}"
+						//Todo: THe following Try and Catch is a temp solution until ARM is fully integrated
+						try {
+							scyllaBuildShaId = artifact.fetchMetadataValue (
+								downloadFromCloud: downloadFromCloud,
+								artifactSourceJob: artifactSourceJob,
+								artifactSourceJobNum: artifactSourceJobNum,
+								cloudUrl: osCloudUrl,
+								fieldName: 'scylla-x86_64-BuildID\\[sha1\\]:'
+							)
+							echo "scyllaBuildShaId:${scyllaBuildShaId}"
+						} catch (error) {
+							scyllaBuildShaId = artifact.fetchMetadataValue (
+								downloadFromCloud: downloadFromCloud,
+								artifactSourceJob: artifactSourceJob,
+								artifactSourceJobNum: artifactSourceJobNum,
+								cloudUrl: osCloudUrl,
+								fieldName: 'scylla-BuildID\\[sha1\\]:'
+							)
+							echo "scyllaBuildShaId:${scyllaBuildShaId}"
+						}
+
+						if (amiOS == "ubuntu:20.04") {
+							repoUrl = repoUrl + branchProperties.scyllaUnifiedPkgRepo + "/scylla.list"
+							echo "repoUrl:${repoUrl}"
+						}
+
+/*
+						echo "Build AMI"
+						echo "========="
+						if (buildNewAMI) {
+							build.buildAmi(dryRun: params.DRY_RUN,
+	 							amiWorkDir: agentAmiWorkDir,
+								amiPropertiesFile: amiPropertiesFile,
+								dpackagerAwsCommand: "$dpackagerAwsCommand",
+								repoUrl: repoUrl,
+								osDistro: amiOS,
+							)
+						} else {
+							// The test phase reads AMI ID from a properties file created by ami.sh (above, on if). As we don't build it, we create it here.
+							// ToDo - get rid of the properties file.
+							sh("echo 'scylla_ami_id=$testExistingAMI' > $amiPropertiesFile")
+							if (artifact.publishArtifactsStatus(generalProperties.amiIdFile, WORKSPACE)) {
+								error("Could not publish some item(s). See log for details")
+							}
+						}
+
+						amiProperties = readProperties file: amiPropertiesFile
+						artifact.addLineToBuildMetadataFile("scylla-ami-id", amiProperties.scylla_ami_id)
+						artifact.addLineToBuildMetadataFile("ami-base-os", amiOS)
+						publishStatus = artifact.publishArtifactsStatus(generalProperties.buildMetadataFile, WORKSPACE)
+						if (publishStatus) {
+							error("Could not publish ${generalProperties.buildMetadataFile} (after append ami id).")
+						}
+
+						if (params.RUN_AMI_VERSION_TAG_TEST) {
+						    if (buildNewAMI) {
+							    echo "Test AMI tag version"
+							    echo "===================="
+							    install.testAmiVersionTag (
+								    dryRun: params.DRY_RUN,
+								    amiImageId: amiProperties.scylla_ami_id,
+								    dpackagerCommand: "$WORKSPACE/${gitProperties.scyllaPkgCheckoutDir}/${generalProperties.dpackagerPath}",
+								    amiRegion: generalProperties.amiDefaultTestRegion,
+								    expectedVersionID: versionFromMetadata,
+								    expectedRelease: releaseFromMetadata,
+							    )
+						    }
+						}
+*/
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+					}
+				}
+			}
+		}
+/*
+		stage('AMI Base Instance Test') {
+			when {
+				expression {! params.SKIP_TEST}
+			}
+			steps {
+				script {
+					if (params.DRY_RUN){
+						echo "Skipping ${env.STAGE_NAME} stage as running on Dry run"
+					} else {
+						if (amiProperties.scylla_ami_id.isEmpty()) {
+							currentBuild.result = 'FAILURE'
+							error("Missing AMI ID. Expected property scylla_ami_id on file amiPropertiesFile created on build phase. Can't run tests")
+						} else {
+							amiTestJobPath = "$calledBuildsDir${branchProperties.qaArtifactsCalledByAmiBuild}"
+							test.runAmiTests(
+								instanceTypeList: testInstanceTypes,
+								jobName: amiTestJobPath,
+								amiID: amiProperties.scylla_ami_id,
+								managerAgentRepoListUrl: managerAgentRepoListUrl,
+								qaJobProvisionType: qaJobProvisionType,
+								postBehaviorType: qaNodesPostBehaviorType,
+								waitForBuilds: true,
+								failIfTestFailed: true,
+							)
+						}
+					}
+				}
+			}
+		}
+
+		stage('Copy AMI to Testing Region') {
+			when {
+				expression {params.RUN_DOWNSTREAM_JOBS}
+			}
+			steps {
+				script {
+					node(params.X86_NODE_PARAM) { // Running on packager as dpackager is not available on jenkins server
+						dpackagerAwsCommand = general.setAwsDpackagerCommand ("", gitProperties.scyllaPkgCheckoutDir)
+						amiRegionsFileName = "AMI_region_IDs.txt"
+						jenkins.checkAndTagAwsInstance(runningUserID)
+						additionalAwsAccountIds = "${generalProperties.dbasslabAccountId} "
+						additionalAwsAccountIds += "${generalProperties.salesAccountId} "
+						additionalAwsAccountIds += "${generalProperties.dbaasProductionAccountId} "
+						additionalAwsAccountIds += "${generalProperties.dbaasStaging} "
+						String amiTag
+
+						cloudformationGeneratedFile = "scylla_cluster_${versionFromMetadata}_${releaseFromMetadata}.yaml"
+						
+						if (params.DRY_RUN){
+							echo "Skipping ${env.STAGE_NAME} stage as running on Dry run."
+						} else {
+							echo "Checkout agent phase for Copy AMI to Testing Region"
+							echo "==================================================="
+							git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+							//We need it to run dpackager and python scripts
+							git.checkoutToDir(relengRepo, relengBranch, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+							git.checkoutToDir(machineImageRepo, machineImageSha, gitProperties.scyllaMachineImageCheckoutDir)
+
+							agentPythonScriptsDir = "$WORKSPACE/${gitProperties.scyllaPkgCheckoutDir}/${generalProperties.pipelinesPythonPath}"
+
+							echo "Change permissions and call some more tests (don't wait)"
+							echo "==================================================="
+							amiSnapshotId = general.runOrDryRunShOutput(params.DRY_RUN, "aws ec2 describe-images  --image-id ${amiProperties.scylla_ami_id} --region us-east-1 | grep SnapshotId | awk '{print \$2}' | tr -d \'\",\'", "Get AMI Snapshot ID")
+							sh "$WORKSPACE/$dpackagerAwsCommand -- ${agentPythonScriptsDir}/aws-ec2-change-permission --scylla_ami_id ${amiProperties.scylla_ami_id} --scylla_snapshot_id ${amiSnapshotId} --aws_accounts ${additionalAwsAccountIds}"
+							if (JOB_NAME.contains("releng-testing") && relengBranch.contains("master")) {
+							    amiTag = "releng-testing-master"
+							} else {
+							    amiTag = git.shaValue(amiTag) ? branchProperties.stableBranchName : relengBranch
+							}
+							amiOsForTag = amiOS.replaceAll(':','-')
+
+							dir("${gitProperties.scyllaPkgCheckoutDir}/${generalProperties.pipelinesPythonPath}") {
+								args =  "--scylla_source_ami_id=${amiProperties.scylla_ami_id} "
+								args += "--build_tag=${env.BUILD_TAG} "
+								args += "--scylla_branch=$amiTag "
+								args += "--base_os=$amiOsForTag "
+								args += "--build_id=${env.BUILD_ID} "
+								args += "--git_commit=${env.GIT_COMMIT} "
+								args += "--source_aws_region=${params.SOURCE_AWS_REGION} "
+								args += "--test_aws_region=${params.TESTING_AWS_REGION} "
+								args += "--dest_aws_regions=${params.COPY_AMI_TO_AWS_REGIONS} "
+								args += "--regions_file_path=$WORKSPACE/$amiRegionsFileName "
+								args += "--scylla_build_sha_id=$scyllaBuildShaId "
+								args += "--cloudformation_template_file=$WORKSPACE/$gitProperties.scyllaMachineImageCheckoutDir/$generalProperties.cloudformationTemplateFilePath/scylla.yaml.j2 "
+								echo "Copy AMI to Testing Region and more regions. |./aws-ec2-copy-instances $args|"
+
+								testingAmiId = sh(script: "bash -c 'set -o pipefail; $WORKSPACE/$dpackagerAwsCommand -- ./aws-ec2-copy-instances $args | tail -n 1'", returnStdout: true).trim()
+							}
+							if (!fileExists ("$WORKSPACE/$amiRegionsFileName")) {
+								git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+								error ("Failed to copy AMI instance to testing region - results file not found")
+							} else {
+								def regionsFile = readFile("$WORKSPACE/$amiRegionsFileName")
+								if (regionsFile.size() == 0) {
+									git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+									error ("Failed to copy AMI instance to testing region - results file is empty")
+								}
+							}
+							artifact.generateCloudformationAndPublish("$WORKSPACE/$dpackagerAwsCommand", cloudformationGeneratedFile, repoUrl)
+							echo "Testing AMI ID: |$testingAmiId|"
+							publishStatus = artifact.publishArtifactsStatus(amiRegionsFileName, WORKSPACE)
+							if (publishStatus) {
+								git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+								error("Could not publish $amiRegionsFileName (after copy ami to more regions).")
+							}
+						}
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+					}
+				}
+			}
+		}
+
+		stage('AMI Additional Instances Tests') {
+			when {
+				expression {(!(params.SKIP_TEST || params.SKIP_ADDITIONAL_TESTS)) && extendedTestInstanceTypes}
+			}
+			steps {
+				script {
+					if (params.DRY_RUN) {
+						echo "Skipping ${env.STAGE_NAME} stage as running on Dry run"
+					} else {
+						test.runAmiTests(
+							instanceTypeList: extendedTestInstanceTypes,
+							jobName: amiTestJobPath,
+							amiID: amiProperties.scylla_ami_id,
+							managerAgentRepoListUrl: managerAgentRepoListUrl,
+							waitForBuilds: true,
+							failIfTestFailed: true,
+						)
+					}
+				}
+			}
+		}
+        */
+	}
+/*
+	post {
+		//Order is: always, changed, fixed, regression, aborted, failure, success, unstable, and cleanup.
+		always {
+			script {
+				if (binding.hasVariable('initPipelineDone')) {
+					mail.mailIfError("${devAddress}", "${currentBuild.currentResult}: ${jobTitle}", "${currentBuild.currentResult}: ${jobTitle}: ${logText}")
+				} else if (!(JOB_NAME.contains("releng-testing") || params.DRY_RUN || params.DEBUG_MAIL)) {
+					mail (
+						to: "releng@scylladb.com",
+						subject: "${currentBuild.currentResult}: ${env.JOB_NAME} [${env.BUILD_NUMBER}]",
+						body: "${env.JOB_NAME} [${env.BUILD_NUMBER}] ${currentBuild.currentResult} at the very beginning. Please see Jenkins logs for details"
+					)
+					cleanWs()
+				} else {
+					cleanWs()
+				}
+			}
+		}
+
+		fixed {
+			script {
+				mail.mailFixed("${devAddress}", "Fixed ${currentBuild.currentResult}: ${jobTitle}", "Fixed ${currentBuild.currentResult}: ${jobTitle}: ${logText}")
+			}
+		}
+
+		success {
+			script {
+				if (params.DRY_RUN){
+					echo "Skipping ${env.STAGE_NAME} stage as running on Dry run"
+				} else if (params.RUN_DOWNSTREAM_JOBS) {
+					if (!testingAmiId) {
+						echo "Warning: Testing on original US ID, as EU ID was not found"
+						amiIdForTests = amiProperties.scylla_ami_id
+						amiRegionForTests = params.SOURCE_AWS_REGION
+					} else {
+						amiIdForTests = testingAmiId
+						amiRegionForTests = params.TESTING_AWS_REGION
+					}
+					echo "AMI based tests will run on region: |$amiRegionForTests|, ID: |$amiIdForTests|"
+					buildsToRun = branchProperties.amiBasedJobs
+					ArrayList jobNames = buildsToRun.split('\\,')
+					jobNames.each { jobName ->
+						if (jenkins.jobEnabled("$calledBuildsDir${jobName}")) {
+							echo "Running AMI based test job ${jobName}"
+							jobResults=build job: "$calledBuildsDir${jobName}",
+							parameters: [
+								string(name: 'scylla_ami_id', value: amiIdForTests),
+								string(name: 'scylla_desc', value: releaseName),
+								string(name: 'aws_region', value: amiRegionForTests),
+								string(name: 'provision_type', value: qaJobProvisionType),
+								string(name: 'post_behavior_db_nodes', value: qaNodesPostBehaviorType),
+								string(name: 'post_behavior_loader_nodes', value: qaNodesPostBehaviorType),
+								string(name: 'post_behavior_monitor_nodes', value: qaNodesPostBehaviorType),
+							],
+							propagate: false,
+							wait: false
+						}
+					}
+					if (branchProperties.amiBasedDebugJobs) {
+						debugBuildPackUrl = "${buildPackUrl}rpm_debug/"
+						debugBuildPackUrl = general.addS3PrefixIfMissing(debugBuildPackUrl)
+						buildsToRun = branchProperties.amiBasedDebugJobs
+						ArrayList debugJobNames = buildsToRun.split('\\,')
+						debugJobNames.each { jobName ->
+							if (jenkins.jobEnabled("$calledBuildsDir${jobName}")) {
+								echo "Running AMI based scylla debug job ${jobName}"
+								jobResults=build job: "$calledBuildsDir${jobName}",
+								parameters: [
+									string(name: 'scylla_ami_id', value: amiIdForTests),
+									string(name: 'aws_region', value: amiRegionForTests),
+									string(name: 'provision_type', value: qaJobProvisionType),
+									string(name: 'post_behavior_db_nodes', value: qaNodesPostBehaviorType),
+									string(name: 'post_behavior_loader_nodes', value: qaNodesPostBehaviorType),
+									string(name: 'post_behavior_monitor_nodes', value: qaNodesPostBehaviorType),
+									string(name: 'update_db_packages', value: debugBuildPackUrl),
+								],
+								propagate: false,
+								wait: false
+							}
+						}
+					}
+				} else {
+					echo "Skipping running AMI based tests upon user request"
+				}
+			}
+		}
+	}
+    */
+}

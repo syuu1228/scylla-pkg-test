@@ -1,0 +1,397 @@
+#!groovy
+// Pipeline next
+// In order to debug, set RELENG_BRANCH on Jenkins job with value of the debug branch.
+// example: refs/heads/build-pipeline-into-scm
+// If you work on a fork, also set the RELENG_REPO with your fork such as git@github.com:hagitsegev/scylla-pkg or
+// use the default repo of git@github.com:scylladb/scylla-pkg or git@github.com:scylladb/scylla-enterprise-pkg
+
+
+Map modules = [:]
+pipeline {
+	parameters {
+		// Mandatory:
+		string(name: 'X86_NODE_PARAM', defaultValue: 'packager', description: 'On which node to run.')
+		// Optional
+		string(name: 'TIMEOUT_PARAM', defaultValue: '4', description: 'Build timeout (in hours)')
+		string(name: 'RELENG_REPO', defaultValue: '', description: 'Branch of pkg repo or fork. If empty - will take scylla-pkg repo (examples: git@github.com:scylladb/scylla-pkg, git@github.com:scylladb/scylla-enterprise-pkg, git@github.com:hagitsegev/scylla-pkg)')
+		string(name: 'RELENG_BRANCH', defaultValue: '', description: 'Branch of pkg repo. If empty - will take next branch (next, next-3.1)')
+		string(name: 'USE_EXISTING_RPM_DEB_URL', defaultValue: '', description: 'Existing rpm-deb URL - for debug use / in case of a test issue. Testing main/s should exist. Take from the base build of lat debug run.')
+		booleanParam(name: 'SKIP_UNIFIED_TEST', defaultValue: false, description: 'Set to skip Unified-deb artifact test - for debug use / in case of a test issue / when this step passed on last run, and a later step failed.')
+		booleanParam(name: 'SKIP_AMI_TEST', defaultValue: false, description: 'Set to skip AMI test - for debug use / in case of a test issue.')
+		booleanParam(name: 'SKIP_GCE_TEST', defaultValue: false, description: 'Set to skip GCE test - for debug use / in case of a test issue.')
+		booleanParam(name: 'PRESERVE_WORKSPACE', defaultValue: false, description: 'Check this if you need the workspace to remain (for debug)')
+		booleanParam(name: 'DEBUG_MAIL', defaultValue: false, description: 'Uncheck if you want mail to rnd-int. Default is to sent to build requester only (you).')
+		booleanParam(name: 'DRY_RUN', defaultValue: false, description: 'Check this to check pipeline syntax. will not perform anything.')
+		booleanParam(name: 'FORCE_RUNNING_BUILDS_EVEN_IF_NO_CHANGES', defaultValue: false, description: 'Set to run builds even if not changes between this run and last success run')
+	}
+	agent {
+		label {
+			label "built-in"
+		}
+	}
+
+	environment {
+		AWS_ACCESS_KEY_ID     = credentials('jenkins2-aws-secret-key-id')
+		AWS_SECRET_ACCESS_KEY = credentials('jenkins2-aws-secret-access-key')
+	}
+
+	options {
+		disableConcurrentBuilds()
+		timeout(time: env.TIMEOUT_PARAM, unit: 'HOURS')
+		buildDiscarder(
+			logRotator(
+				numToKeepStr: '10',
+				daysToKeepStr: env.JOB_NAME.contains("releng-testing") ? '14': ''
+			)
+		)
+	}
+
+
+	stages {
+
+		stage ('Prepare') {
+			steps {
+				script {
+					lastStage = env.STAGE_NAME
+					generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+					general = load "${generalProperties.groovyPath}/general.groovy"
+					general.initPipeline()
+					needToRun = true
+					baseOS = 'ubuntu:20.04'
+					nextMachineImageSha = git.remoteBranchSha(gitProperties.scyllaMachineImageRepoUrl, branchProperties.nextBranchName)
+					stableMachineImageSha = git.remoteBranchSha(gitProperties.scyllaMachineImageRepoUrl, branchProperties.stableBranchName)
+					echo "Next machineImageSha |$nextMachineImageSha|, stableMachineImageSha: |$stableMachineImageSha|"
+					if (! params.FORCE_RUNNING_BUILDS_EVEN_IF_NO_CHANGES && nextMachineImageSha == stableMachineImageSha) {
+						echo "SHA of next and stable branches are the same: $stableMachineImageSha, No need to run. Exiting"
+						needToRun = false
+					} else {
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+						dpackagerAwsCommand = general.setAwsDpackagerCommand ("", gitProperties.scyllaPkgCheckoutDir)
+						git.checkoutToDir(gitProperties.scyllaMachineImageRepoUrl, nextMachineImageSha, gitProperties.scyllaMachineImageCheckoutDir)
+						listCommittersEmail	= mail.committerEmailAddress(nextMachineImageSha, stableMachineImageSha, "$WORKSPACE/${gitProperties.scyllaMachineImageCheckoutDir}", params.DEBUG_MAIL)
+						scyllaSha = git.remoteBranchSha(gitProperties.scyllaRepoUrl, branchProperties.stableBranchName)
+						pkgSha = git.remoteBranchSha(relengRepo, relengBranch)
+
+						(qaJobProvisionType, qaNodesPostBehaviorType) = jenkins.setQAJobParameters()
+						relengTestingRun = jenkins.debugBuild()
+
+						artifactSourceJob = "${branchProperties.calledBuildsDir}${branchProperties.relocUploaderJobName}"
+						artifactSourceJobNum = params.ARTIFACT_SOURCE_BUILD_NUM ?: Jenkins.instance.getItemByFullName(artifactSourceJob).lastSuccessfulBuild.number.toString()
+						if (params.USE_EXISTING_RPM_DEB_URL) {
+							cloudUrl = params.USE_EXISTING_RPM_DEB_URL
+							skipUnifiedBuild = true
+							downloadFromCloud = true
+						} else {
+							cloudUrl = artifact.getLastSuccessfulUrl (artifactWebUrl: "latest",
+								artifactSourceJob: artifactSourceJob,
+								artifactSourceJobNum: artifactSourceJobNum,
+								fieldName: "rpm-deb-pack-url:"
+							)
+							skipUnifiedBuild = false
+							downloadFromCloud = false
+						}
+
+						scyllaUrlID = artifact.fetchMetadataValue (
+							downloadFromCloud: downloadFromCloud,
+							artifactSourceJob: artifactSourceJob,
+							artifactSourceJobNum: artifactSourceJobNum,
+							cloudUrl: cloudUrl,
+							fieldName: "url-id:"
+						)
+						releaseShaId = artifact.fetchMetadataValue (
+							downloadFromCloud: downloadFromCloud,
+							artifactSourceJob: artifactSourceJob,
+							artifactSourceJobNum: artifactSourceJobNum,
+							cloudUrl: cloudUrl,
+							fieldName: "scylla-release:"
+						)
+						if (params.DRY_RUN) {
+							// Just give latest as some source for later get info
+							scyllaUnifiedDebUrl = branchProperties.latestUnifiedOSUrl
+							promoteUnifiedDebUrl = "s3://${branchProperties.latestUnifiedOSUrl}"
+							scyllaListUrl = "http://${branchProperties.latestUnifiedOSUrl}${branchProperties.scyllaUnifiedPkgRepo}/${branchProperties.listFileName}"
+
+						} else {
+							scyllaUnifiedDebUrl = general.setTestingUrlIfNeeded ("${branchProperties.scyllaDownloadsDebianUnstablePath}/$scyllaUrlID/")
+							promoteUnifiedDebUrl = "s3://${branchProperties.scyllaDownloadsDebianUnstablePath}/$scyllaUrlID"
+							promoteUnifiedDebUrl = general.setTestingUrlIfNeeded (promoteUnifiedDebUrl)
+							scyllaListUrl = "http://${scyllaUnifiedDebUrl}${branchProperties.scyllaUnifiedPkgRepo}/${branchProperties.listFileName}"
+							artifact.addLineToBuildMetadataFile("unified-deb-url", scyllaUnifiedDebUrl)
+						}
+						repoUrl = "$scyllaUnifiedDebUrl${branchProperties.scyllaUnifiedPkgRepo}/${branchProperties.listFileName}"
+						stash(name: generalProperties.buildMetadataFile, includes: generalProperties.buildMetadataFile)
+					}
+				}
+			}
+		}
+
+		stage('Create Unified-deb Repo') {
+			when {
+				expression {needToRun && ! skipUnifiedBuild}
+			}
+			steps {
+				script {
+					node(params.X86_NODE_PARAM) {
+						lastStage = env.STAGE_NAME
+						withCredentials([
+							file(credentialsId: 'scylladb-package-signing-key-2020', variable: 'SCYLLA_GPG_PRIVATE_KEY'),
+							file(credentialsId: 'scylladb-package-signing-key-2020-public', variable: 'SCYLLA_GPG_PUBLIC_KEY'),
+							string(credentialsId: 'scylladb-package-signing-key-2020-public-keyid', variable: 'SCYLLA_GPG_KEYID')])
+						 {
+							git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+							git.checkoutToDir (relengRepo, pkgSha, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+							git.checkoutToDir(gitProperties.scyllaRepoUrl, scyllaSha, gitProperties.scyllaCheckoutDir)
+							git.checkoutToDir(gitProperties.scyllaMachineImageRepoUrl, nextMachineImageSha, gitProperties.scyllaMachineImageCheckoutDir)
+							unstash(name: generalProperties.buildMetadataFile)
+
+							build.prepareBuildDebPkg (
+								dryRun: params.DRY_RUN,
+								mainMode: true,
+								downloadFromCloud: true,
+								cloudUrl: cloudUrl,
+								artifactSourceJob: artifactSourceJob,
+								artifactSourceJobNum: artifactSourceJobNum,
+								scyllaUrlID: scyllaUrlID,
+								scyllaUnifiedDebUrl: scyllaUnifiedDebUrl,
+								buildMode: "release",
+								buildArm: false,
+							)
+
+							git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+						}
+					}
+				}
+			}
+		}
+
+		stage('Call Ubuntu 20.04 Test') {
+			when {
+				expression {needToRun && ! params.SKIP_UNIFIED_TEST}
+			}
+			steps {
+				script {
+					lastStage = env.STAGE_NAME
+					jenkins.runTestJob (
+						dryRun: params.DRY_RUN,
+						failIfCallFailed: true,
+						waitForLongBuilds: true,
+						runJobsSerial: true,
+						calledBuildsDir: calledBuildsDir,
+						testsToRun: branchProperties.qaMadatoryArtifactsCalledByUnifiedDebBuild,
+						qaJobProvisionType: qaJobProvisionType,
+						qaNodesPostBehaviorType: qaNodesPostBehaviorType,
+						urlParamName: "scylla_repo",
+						urlParamValue: scyllaListUrl,
+					)
+				}
+			}
+		}
+
+		stage('Build AMI') {
+			when {
+				expression {needToRun}
+			}
+			steps {
+				script {
+					node(params.X86_NODE_PARAM) {
+						lastStage = env.STAGE_NAME
+						jenkins.checkAndTagAwsInstance(runningUserID)
+						echo "Checkout agent phase"
+						echo "===================="
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+
+						//We need it to run ami.sh script
+						git.checkoutToDir(relengRepo, pkgSha, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+						git.checkoutToDir(gitProperties.scyllaMachineImageRepoUrl, nextMachineImageSha, gitProperties.scyllaMachineImageCheckoutDir)
+						agentAmiWorkDir = "$WORKSPACE/${gitProperties.scyllaMachineImageCheckoutDir}/aws/ami"
+						amiPropertiesFile = "$WORKSPACE/${generalProperties.amiIdFile}"
+
+						echo "Copy Artifacts"
+						echo "=============="
+						artifact.getAmiArtifacts(
+							downloadFromCloud: true,
+							sourceUrl:  scyllaUnifiedDebUrl,
+						)
+
+						echo "Build AMI"
+						echo "========="
+						build.buildAmi(dryRun: params.DRY_RUN,
+							amiWorkDir: agentAmiWorkDir,
+							amiPropertiesFile: amiPropertiesFile,
+							dpackagerAwsCommand: "$dpackagerAwsCommand",
+							repoUrl: repoUrl,
+						)
+						amiProperties = readProperties file: amiPropertiesFile
+						artifact.addLineToBuildMetadataFile("scylla-ami-id", amiProperties.scylla_ami_id)
+						artifact.addLineToBuildMetadataFile("ami-base-os", baseOS)
+						publishStatus = artifact.publishArtifactsStatus(generalProperties.buildMetadataFile, WORKSPACE)
+						if (publishStatus) {
+							error("Could not publish ${generalProperties.buildMetadataFile} (after append ami id).")
+						}
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+					}
+				}
+			}
+		}
+
+		stage('Build GCE') {
+			when {
+				expression {needToRun}
+			}
+			steps {
+				script {
+					node(params.X86_NODE_PARAM) {
+						lastStage = env.STAGE_NAME
+						jenkins.checkAndTagAwsInstance(runningUserID)
+						echo "Checkout agent phase"
+						echo "===================="
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+
+						//We need it to run sh script
+						git.checkoutToDir(relengRepo, pkgSha, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+						git.checkoutToDir(gitProperties.scyllaMachineImageRepoUrl, nextMachineImageSha, gitProperties.scyllaMachineImageCheckoutDir)
+
+						echo "Build GCE image"
+						echo "==============="
+						gceImageId = build.buildGce(
+							dryRun: params.DRY_RUN,
+							baseUrl: repoUrl,
+						)
+						gceImageDbUrl = "$generalProperties.gceImageDbBaseUrl/$gceImageId"
+
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+					}
+				}
+			}
+		}
+
+		stage('Build Azure') {
+			when {
+				expression {needToRun}
+			}
+			steps {
+				script {
+					node(params.X86_NODE_PARAM) {
+						lastStage = env.STAGE_NAME
+						jenkins.checkAndTagAwsInstance(runningUserID)
+						echo "Checkout agent phase"
+						echo "===================="
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+
+						//We need it to run sh script
+						git.checkoutToDir(relengRepo, pkgSha, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+						git.checkoutToDir(gitProperties.scyllaMachineImageRepoUrl, nextMachineImageSha, gitProperties.scyllaMachineImageCheckoutDir)
+
+						echo "Build Azure image"
+						echo "==============="
+						(azureImageId, azureImageName) = build.buildAzure(
+							dryRun: params.DRY_RUN,
+							listFileUrl: repoUrl,
+						)
+
+						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+					}
+				}
+			}
+		}
+
+		stage('AMI & GCE Test') {
+			when {
+				expression {needToRun && !(params.SKIP_AMI_TEST || params.SKIP_GCE_TEST)}
+			}
+			steps {
+				script {
+					lastStage = env.STAGE_NAME
+					managerAgentRepoListUrl = branchProperties.ubuntuManagerAgentListUrl
+					if (params.DRY_RUN){
+						echo "Skipping ${env.STAGE_NAME} stage as running on Dry run"
+					} else {
+						parallel (
+							AmiTest: {
+								if (!params.SKIP_AMI_TEST) {
+									if (amiProperties.scylla_ami_id.isEmpty()) {
+										error("Missing AMI ID. Expected property scylla_ami_id on file amiPropertiesFile created on build phase. Can't run tests")
+									}
+									test.runAmiTests(
+										instanceTypeList: branchProperties.amiTestInstanceTypes,
+										jobName: "$calledBuildsDir${branchProperties.qaArtifactsCalledByAmiBuild}",
+										amiID: amiProperties.scylla_ami_id,
+										managerAgentRepoListUrl: managerAgentRepoListUrl,
+										qaJobProvisionType: qaJobProvisionType,
+										postBehaviorType: qaNodesPostBehaviorType,
+										waitForBuilds: true,
+										failIfTestFailed: true,
+									)
+								}
+							},
+							GceTest: {
+								if (!params.SKIP_GCE_TEST) {
+									test.runGceImageTests (
+										dryRun: params.DRY_RUN,
+										waitForLongBuilds: true,
+										failIfCallFailed: true,
+										calledBuildsDir: calledBuildsDir,
+										buildsToRun: branchProperties.qaArtifactsCalledByGceBuild,
+										qaJobProvisionType: qaJobProvisionType,
+										managerAgentRepoListUrl: managerAgentRepoListUrl,
+										qaNodesPostBehaviorType: qaNodesPostBehaviorType,
+										gceImageDbUrl: gceImageDbUrl,
+										instanceGceTypes: branchProperties.gceTestInstanceTypes,
+									)
+								}
+							}
+						)
+					}
+				}
+			}
+		}
+
+		stage('Push') {
+			when {
+				expression {needToRun && ! skipUnifiedBuild}
+			}
+			steps {
+				script {
+					lastStage = env.STAGE_NAME
+					if (relengTestingRun) {
+						echo "This is a debug build, not pushing to master"
+					} else {
+						git.push2Git(branchProperties.nextBranchName, branchProperties.stableBranchName, params.DRY_RUN, "$WORKSPACE/${gitProperties.scyllaMachineImageCheckoutDir}")
+					}
+				}
+			}
+		}
+	}
+
+	post {
+		//Order is: always, changed, fixed, regression, aborted, failure, success, unstable, and cleanup.
+		always {
+			script {
+				if (binding.hasVariable('initPipelineDone')) {
+					echo "Last stage: |$lastStage|"
+					errorMailAddress = devAddress
+					if (binding.hasVariable('listCommittersEmail')) {
+						errorMailAddress += ", $listCommittersEmail"
+					}
+					mail.mailIfError(errorMailAddress, "$currentBuild.currentResult stage $lastStage: $jobTitle", "${currentBuild.currentResult}: $jobTitle on stage $lastStage: $logText")
+					git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+				} else if (!(JOB_NAME.contains("releng-testing") || params.DRY_RUN || params.DEBUG_MAIL)) {
+					mail (
+						to: "releng@scylladb.com",
+						subject: "${currentBuild.currentResult}: ${env.JOB_NAME} [${env.BUILD_NUMBER}]",
+						body: "${env.JOB_NAME} [${env.BUILD_NUMBER}] ${currentBuild.currentResult} at the very beginning. Please see Jenkins logs for details"
+					)
+					cleanWs()
+				} else {
+					cleanWs()
+				}
+			}
+		}
+
+		fixed {
+			script {
+				mail.mailFixed("$devAddress", "Fixed ${currentBuild.currentResult}: $jobTitle", "Fixed ${currentBuild.currentResult}: $jobTitle: $logText")
+			}
+		}
+	}
+}

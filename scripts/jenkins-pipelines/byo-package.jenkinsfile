@@ -1,0 +1,276 @@
+#!groovy
+// Pipeline byo-package
+// Get from which ready relocatable package, and from which branches to create a package,
+
+Map modules = [:]
+pipeline {
+	parameters {
+		// Mandatory
+		string(name: 'X86_NODE_PARAM', defaultValue: 'packager', description: 'Useful options: packager,loki,dgccd201,thor,ran,sif,huginn,muninn and gce-leader')
+		string(name: 'DEFAULT_PRODUCT', defaultValue: 'scylla', description: 'Default product for all repos, unless specified otherwise.')
+		choice(name: 'DEFAULT_BRANCH', choices: ['next','master'], description: 'Default branch for all repos, unless specified otherwise.')
+
+		// Optional
+		choice(name: 'ARTIFACT_SOURCE_JOB_NAME', choices: ['next','byo','build', '/scylla-master/releng-testing/build', '/scylla-master/releng-testing/next'], description: 'Jenkins build job that built the relocatable package')
+		string(name: 'ARTIFACT_SOURCE_BUILD_NUM', defaultValue: '', description: 'Build number to take artifacts from. Leave empty to use last available build. Use with ARTIFACT_SOURCE_JOB_NAME to take artifacts from Jenkins, or ARTIFACT_WEB_URL to take them from cloud.')
+		string(name: 'ARTIFACT_WEB_URL', defaultValue: 'latest', description: 'URL to take reloc items from. Use when reloc is not available on jenkins, or when running on AWS, which will download faster from S3.')
+		booleanParam(name: 'CREATE_CENTOS_RPM', defaultValue: true, description: 'Uncheck this if you need only unified deb')
+		booleanParam(name: 'CREATE_UNIFIED_DEB', defaultValue: false, description: 'Check this if you need an unified-deb')
+		booleanParam(name: 'CREATE_AMI', defaultValue: false, description: 'Check this if you need an AMI based on latest unified-deb on S3 (it uploads to amazonaws)')
+		booleanParam(name: 'CREATE_GCE', defaultValue: false, description: 'Check this if you need an GCE image based on latest unified-deb on S3 (it uploads to amazonaws)')
+		booleanParam(name: 'CREATE_AZURE', defaultValue: false, description: 'Check this if you need an Azure image based on latest unified-deb on S3 (it uploads to amazonaws)')
+		string(name: 'TIMEOUT_PARAM', defaultValue: '2', description: 'Job timeout (in hours)')
+		choice(name: 'BUILD_MODE', choices: ['release','debug','dev'], description: 'Choose build mode of the relocatable package: release | debug | dev')
+		booleanParam(name: 'PRESERVE_WORKSPACE', defaultValue: false, description: 'Check this if you need the workspace to remain (for debug)')
+		booleanParam(name: 'DEBUG_MAIL', defaultValue: true, description: 'Uncheck if you want mail to rnd-int. Default is to sent to build requester only (you).')
+		booleanParam(name: 'DRY_RUN', defaultValue: false, description: 'Check this to check pipeline syntax. will not perform anything.')
+		string(name: 'MACHINE_IMAGE_REPO', defaultValue: 'git@github.com:scylladb/${DEFAULT_PRODUCT}-machine-image.git', description: 'Needed if you want to build packages (centos-rpm)')
+		string(name: 'MACHINE_IMAGE_BRANCH', defaultValue: '${DEFAULT_BRANCH}', description: '')
+		string(name: 'RELENG_REPO', defaultValue: 'git@github.com:scylladb/${DEFAULT_PRODUCT}-pkg.git', description: 'Pay attention that this controls the job parameters. Be sure to give a default that contains the parameters directive. If changed here, should also change on pipeline section')
+		string(name: 'RELENG_BRANCH', defaultValue: '${DEFAULT_BRANCH}', description: 'Pay attention that this controls the job parameters. Be sure to give a default that contains the parameters directive. If changed here, should also change on pipeline section')
+	}
+
+	agent {
+		label {
+			label env.X86_NODE_PARAM
+		}
+	}
+
+	environment {
+		AWS_ACCESS_KEY_ID     = credentials('jenkins2-aws-secret-key-id')
+		AWS_SECRET_ACCESS_KEY = credentials('jenkins2-aws-secret-access-key')
+	}
+
+	options {
+		timestamps()
+		timeout(time: env.TIMEOUT_PARAM, unit: 'HOURS')
+		buildDiscarder(
+			logRotator(
+				numToKeepStr: '40',
+				daysToKeepStr: '14'
+			)
+		)
+	}
+
+	stages {
+
+		stage ('Prepare') {
+			steps {
+				script {
+					generalProperties = readProperties file: 'scripts/jenkins-pipelines/general.properties'
+					general = load "${generalProperties.groovyPath}/general.groovy"
+					general.initPipeline()
+
+					artifactSourceJob = params.ARTIFACT_SOURCE_JOB_NAME
+					if (artifactSourceJob == "byo") {
+						artifactSourceJob = "${branchProperties.calledBuildsDir}${branchProperties.byoJobName}"
+					} else if (artifactSourceJob == "next") {
+						artifactSourceJob = "${branchProperties.calledBuildsDir}${branchProperties.nextJobName}"
+					} else if (artifactSourceJob == "build") {
+						artifactSourceJob = "${branchProperties.calledBuildsDir}${branchProperties.buildJobName}"
+					}
+
+					scyllaCouldStoragePath = "byo" //We dont upload to S3 on byo
+
+					jsonDir = "$WORKSPACE/${gitProperties.scyllaPkgCheckoutDir}/${generalProperties.jsonDir}"
+					productName = "scylla"
+					amiWorkDir = "$WORKSPACE/${gitProperties.scyllaMachineImageCheckoutDir}/aws/ami"
+
+					buildDebugPackages = (params.BUILD_MODE == "debug" || params.BUILD_MODE == "")
+					buildReleasePackages = (params.BUILD_MODE == "release" || params.BUILD_MODE == "")
+				}
+			}
+		}
+
+		stage('Checkout') {
+			steps {
+				script {
+					lastStage = env.STAGE_NAME
+					git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+					git.checkoutToDir (params.RELENG_REPO, params.RELENG_BRANCH, gitProperties.scyllaPkgCheckoutDir, disableSubmodules)
+
+					git.checkoutToDir(gitProperties.scyllaRepoUrl, branchProperties.stableBranchName, gitProperties.scyllaCheckoutDir)
+					git.checkoutToDir (params.MACHINE_IMAGE_REPO, params.MACHINE_IMAGE_BRANCH, gitProperties.scyllaMachineImageCheckoutDir)
+
+					artifactSourceJobNum = params.ARTIFACT_SOURCE_BUILD_NUM ?: Jenkins.instance.getItemByFullName(artifactSourceJob).lastSuccessfulBuild.number.toString()
+					paramArtifactWebUrl = params.ARTIFACT_WEB_URL ?: "latest"
+
+					cloudUrl = artifact.getLastSuccessfulUrl (
+						artifactWebUrl: paramArtifactWebUrl,
+						artifactSourceJob: artifactSourceJob,
+						artifactSourceJobNum: artifactSourceJobNum,
+						fieldName: "rpm-deb-pack-url:",
+					)
+
+					scyllaUrlID = artifact.fetchMetadataValue (
+						downloadFromCloud: true,
+						artifactSourceJob: artifactSourceJob,
+						artifactSourceJobNum: artifactSourceJobNum,
+						cloudUrl: cloudUrl,
+						fieldName: "url-id:"
+					)
+					rpmUrl = general.setTestingUrlIfNeeded ("${branchProperties.scyllaDownloadsRpmUnstablePath}/$scyllaUrlID/")
+					scyllaDebUrl = general.setTestingUrlIfNeeded ("${branchProperties.scyllaDownloadsDebianUnstablePath}/$scyllaUrlID/")
+					scyllaDebListFileUrl = "${scyllaDebUrl}${branchProperties.scyllaUnifiedPkgRepo}/${branchProperties.listFileName}"
+
+
+					general.lsPath (WORKSPACE, "Workspace content after check-outs")
+				}
+			}
+		}
+
+		stage('Create CentOS RPM Repo') {
+			when {
+				expression {params.CREATE_CENTOS_RPM}
+			}
+			steps {
+				script {
+					lastStage = env.STAGE_NAME
+					if (buildReleasePackages) {
+						build.prepareBuildRpm (
+							dryRun: params.DRY_RUN,
+							mainMode: true,
+							downloadFromCloud: true,
+							cloudUrl: cloudUrl,
+							artifactSourceJob: artifactSourceJob,
+							artifactSourceJobNum: artifactSourceJobNum,
+							scyllaUrlID: scyllaUrlID,
+							rpmUrl: rpmUrl,
+							buildMode: "release",
+						)
+					}
+
+					if (buildDebugPackages) {
+						build.prepareBuildRpm (
+							dryRun: params.DRY_RUN,
+							mainMode: !buildReleasePackages,
+							downloadFromCloud: true,
+							cloudUrl: cloudUrl,
+							artifactSourceJob: artifactSourceJob,
+							artifactSourceJobNum: artifactSourceJobNum,
+							scyllaUrlID: "$scyllaCouldStoragePath/${branchProperties.debugProductName}",
+							rpmUrl: rpmUrl,
+							buildMode: "debug",
+						)
+					}
+				}
+			}
+		}
+
+		stage('Create debian Repo') {
+			when {
+				expression {params.CREATE_UNIFIED_DEB || params.CREATE_AMI || params.CREATE_GCE || params.CREATE_AZURE}
+			}
+			environment {
+				SCYLLA_GPG_PRIVATE_KEY = credentials('scylladb-package-signing-key-2020')
+				SCYLLA_GPG_PUBLIC_KEY = credentials('scylladb-package-signing-key-2020-public')
+				SCYLLA_GPG_KEYID = credentials('scylladb-package-signing-key-2020-public-keyid')
+			}
+			steps {
+				script {
+					lastStage = env.STAGE_NAME
+					if (buildReleasePackages) {
+						build.prepareBuildDebPkg (
+							dryRun: params.DRY_RUN,
+							mainMode: true,
+							downloadFromCloud: true,
+							cloudUrl: cloudUrl,
+							artifactSourceJob: artifactSourceJob,
+							artifactSourceJobNum: artifactSourceJobNum,
+							scyllaUrlID: scyllaUrlID,
+							scyllaUnifiedDebUrl: scyllaDebUrl,
+							buildMode: "release",
+						)
+					}
+
+					if (buildDebugPackages) {
+						build.prepareBuildDebPkg (
+							dryRun: params.DRY_RUN,
+							mainMode: !buildReleasePackages,
+							downloadFromCloud: true,
+							cloudUrl: paramArtifactWebUrl,
+							artifactSourceJob: artifactSourceJob,
+							artifactSourceJobNum: artifactSourceJobNum,
+							scyllaUrlID: scyllaCouldStoragePath,
+							scyllaUnifiedDebUrl: "none",
+							buildMode: "debug",
+						)
+					}
+				}
+			}
+		}
+
+		stage('Build AMI') {
+			when {
+				expression {params.CREATE_AMI}
+			}
+			steps {
+				script {
+					dpackagerAwsCommand = general.setAwsDpackagerCommand ("", "$WORKSPACE/${gitProperties.scyllaPkgCheckoutDir}")
+					build.buildAmi (dryRun: params.DRY_RUN,
+						amiWorkDir: "$WORKSPACE/${gitProperties.scyllaMachineImageCheckoutDir}/aws/ami",
+						amiPropertiesFile:"$WORKSPACE/${generalProperties.amiIdFile}",
+						dpackagerAwsCommand: dpackagerAwsCommand,
+						repoUrl: scyllaDebListFileUrl,
+						osDistro: "ubuntu:20.04",
+					)
+				}
+			}
+		}
+
+		stage('Build GCE image') {
+			when {
+				expression {params.CREATE_GCE}
+			}
+			steps {
+				script {
+					build.buildGce(
+						dryRun: params.DRY_RUN,
+						baseUrl: scyllaDebListFileUrl,
+						osDistro: "ubuntu:20.04",
+					)
+					artifact.addLineToBuildMetadataFile("scylla-gce-image-id", gceImageId)
+					artifact.addLineToBuildMetadataFile("scylla-gce-image-db", gceImageDbUrl)
+					artifact.publishMetadataFile()
+				}
+			}
+		}
+
+		stage('Build Azure image') {
+			when {
+				expression {params.CREATE_AZURE}
+			}
+			steps {
+				script {
+					(azureImageId, azureImageName) = build.buildAzure(
+						dryRun: params.DRY_RUN,
+						listFileUrl: scyllaDebListFileUrl,
+					)
+					artifact.addLineToBuildMetadataFile("azure-image-id", azureImageId)
+					artifact.addLineToBuildMetadataFile("azure-image-name", azureImageName)
+					artifact.publishMetadataFile()
+				}
+			}
+		}
+	}
+
+	post {
+		//Order is: always, changed, fixed, regression, aborted, failure, success, unstable, and cleanup.
+		always {
+			script {
+				if (binding.hasVariable('initPipelineDone')) {
+					mail.mailIfError("$devAddress", "${currentBuild.currentResult} stage $lastStage: $jobTitle", "${currentBuild.currentResult}: $jobTitle on stage $lastStage: $logText")
+					git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+				} else {
+					cleanWs()
+				}
+			}
+		}
+
+		fixed {
+			script {
+				mail.mailFixed("$devAddress", "Fixed ${currentBuild.currentResult}: $jobTitle", "Fixed ${currentBuild.currentResult}: $jobTitle: $logText")
+			}
+		}
+	}
+}
