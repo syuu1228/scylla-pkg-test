@@ -34,17 +34,17 @@ pipeline {
                     }
                     artifactSourceJobNum = params.ARTIFACT_SOURCE_BUILD_NUM ?: Jenkins.instance.getItemByFullName(artifactSourceJob).lastSuccessfulBuild.number.toString()
                     artifactWebUrl = params.ARTIFACT_WEB_URL ?: "latest"
-                    if (!artifctWebUrl || artifactWebUrl == "lastest") {
+                    if (!artifactWebUrl || artifactWebUrl == "lastest") {
+                        step([  $class: 'CopyArtifact',
+                            filter: "00-Build.txt",
+                            fingerprintArtifacts: true,
+                            projectName: artifactSourceJob,
+                            selector: [$class: 'SpecificBuildSelector', buildNumber: $artifactSourceJobNum],
+                            target: WORKSPACE,
+                            optional: false
+                        ])
+                        sh "cat 00-Build.txt"
                     }
-                    step([  $class: 'CopyArtifact',
-                        filter: "00-Build.txt",
-                        fingerprintArtifacts: true,
-                        projectName: artifactSourceJob,
-                        selector: [$class: 'SpecificBuildSelector', buildNumber: $artifactSourceJobNum],
-                        target: WORKSPACE,
-                        optional: false
-                    ])
-                    sh "cat 00-Build.txt"
                 }
             }
         }
