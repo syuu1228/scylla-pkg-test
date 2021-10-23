@@ -27,6 +27,11 @@ def build(c, repo):
     with open('./amiId.properties', 'w') as f:
         f.write(f'scylla_ami_id={scylla_ami_id}')
 
+@task()
+def generate_properties(c, ami_id):
+    with open('./amiId.properties', 'w') as f:
+        f.write(f'scylla_ami_id={ami_id}')
+
 @task
 def test(c, ami_id):
     sct_env = os.environ.copy()
@@ -41,8 +46,4 @@ def test(c, ami_id):
     with c.cd('./scylla-cluster-tests'):
         c.run('./docker/env/hydra.sh run-test artifacts_test --backend aws', env=sct_env, pty=True)
 
-@task(build, test)
-def all_tasks(ctx):
-    pass
-
-ns = Collection(all_tasks, build, test)
+ns = Collection(build, generate_properties, test)

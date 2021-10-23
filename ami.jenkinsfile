@@ -1,3 +1,5 @@
+#!groovy
+
 pipeline {
     parameters {
         string(name: 'REPO', defaultValue: 'http://downloads.scylladb.com/unstable/scylla/master/deb/unified/2021-08-26T12:02:36Z/scylladb-master/scylla.list', description: 'repo url for AMI')
@@ -30,7 +32,7 @@ pipeline {
                             sh "poc-venv/bin/invoke ami.build --repo ${params.REPO}"
                             amiProperties = readProperties file: "$WORKSPACE/amiId.properties"
                         } else {
-                            sh "poc-venv/bin/invoke ami.generate_properties --ami-id ${params.TEST_EXISTING_AMI_ID}"
+                            sh "poc-venv/bin/invoke ami.generate-properties --ami-id ${params.TEST_EXISTING_AMI_ID}"
                             amiProperties = readProperties file: "$WORKSPACE/amiId.properties"
                         }
                     }
