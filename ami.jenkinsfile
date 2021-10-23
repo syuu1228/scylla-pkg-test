@@ -4,6 +4,7 @@ pipeline {
     parameters {
         string(name: 'REPO', defaultValue: 'http://downloads.scylladb.com/unstable/scylla/master/deb/unified/2021-08-26T12:02:36Z/scylladb-master/scylla.list', description: 'repo url for AMI')
         string(name: 'X86_NODE_PARAM', defaultValue: 'packager', description: 'On which node to run the ami build. Useful options: packager,loki,dgccd201,thor,ran,huginn,muninn.')
+		choice(name: 'OS_DISTRO', choices: ['ubuntu:20.04', 'centos:7'], description: 'Choose on which OS the AMI will be build. Please note that centos:7 is kept for end cases manual use')
         string(name: 'TEST_EXISTING_AMI_ID', defaultValue: '', description: 'AMI ID to test. If empty - will build a new AMI')
         booleanParam(name: 'SKIP_TEST', defaultValue: false, description: 'Set to skip ami test - for debug use')
     }
@@ -29,7 +30,7 @@ pipeline {
                         sh "python3 -m virtualenv poc-venv"
                         sh "source poc-venv/bin/activate && pip3 install invoke rich"
                         if (params.TEST_EXISTING_AMI_ID == '') {
-                            sh "poc-venv/bin/invoke ami.build --repo ${params.REPO}"
+                            sh "poc-venv/bin/invoke ami.build --repo ${params.REPO} --distro ${params.OS_DISTRO}"
                             amiProperties = readProperties file: "$WORKSPACE/amiId.properties"
                         } else {
                             sh "poc-venv/bin/invoke ami.generate-properties --ami-id ${params.TEST_EXISTING_AMI_ID}"

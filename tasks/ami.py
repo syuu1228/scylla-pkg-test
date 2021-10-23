@@ -10,19 +10,25 @@ from rich.console import Console
 console = Console(color_system=None)
 
 @task()
-def build(c, repo):
+def build(c, repo, distro):
     shutil.copyfile('./json_files/ami_variables.json', './scylla-machine-image/aws/ami/variables.json')
     ami_env = os.environ.copy()
-    ami_env['DOCKER_IMAGE'] = 'image_ubuntu20.04'
     ami_env['DPACKAGER_TOOL'] = 'podman'
+    if distro == 'ubuntu:20.04':
+        ami_env['DOCKER_IMAGE'] = 'image_ubuntu20.04'
+        script_name = './build_deb_ami.sh'
+    elif distro == 'centos:7':
+        ami_env['DOCKER_IMAGE'] = 'image_fedora-33'
+        script_name = './build_ami.sh'
+    else:
+        raise Exception('Unsupported distro')
     with c.cd('./scylla-machine-image/aws/ami'):
-        c.run(f'../../../tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- ./build_deb_ami.sh --product scylla --repo {repo} --log-file build/ami.log', env=ami_env)
+        c.run(f'../../../tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- {script_name} --product scylla --repo {repo} --log-file build/ami.log', env=ami_env)
     with open('./scylla-machine-image/aws/ami/build/ami.log') as f:
         ami_log = f.read()
     match = re.search(r'^us-east-1: (.+)$', ami_log, flags=re.MULTILINE)
     if not match:
-        print('AMI build failed')
-        sys.exit(1)
+        raise Exception('AMI build failed')
     scylla_ami_id = match.group(1)
     with open('./amiId.properties', 'w') as f:
         f.write(f'scylla_ami_id={scylla_ami_id}')
