@@ -27,12 +27,10 @@ pipeline {
         stage('prepare') {
             steps {
                 script {
-                    if (amiOS == "centos:7") {
+                    if (params.OS_DISTRO == "centos:7") {
                         artifactSourceJob = params.ARTIFACT_SOURCE_JOB_NAME ?: "/scylla-master/centos-rpm"
-                        lastSuccessUrlFieldName = "centos-rpm-url:"
                     } else {
                         artifactSourceJob = params.ARTIFACT_SOURCE_JOB_NAME ?: "/scylla-master/unified-deb"
-                        lastSuccessUrlFieldName = "unified-deb-url:"
                     }
                     artifactSourceJobNum = params.ARTIFACT_SOURCE_BUILD_NUM ?: Jenkins.instance.getItemByFullName(artifactSourceJob).lastSuccessfulBuild.number.toString()
                     artifactWebUrl = params.ARTIFACT_WEB_URL ?: "latest"
