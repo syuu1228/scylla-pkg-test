@@ -43,7 +43,7 @@ pipeline {
                             target: WORKSPACE,
                             optional: false
                         ])
-                        artifactWebUrl = sh("grep 'unified-deb-url:' 00-Build.txt | awk '{print \$2}'", returnStdout: true).trim()
+                        artifactWebUrl = sh(script: "grep 'unified-deb-url:' 00-Build.txt | awk '{print \$2}'", returnStdout: true).trim()
                     }
                     echo "artifactWebUrl:${artifactWebUrl}"
                 }
