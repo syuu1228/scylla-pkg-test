@@ -18,19 +18,13 @@ pipeline {
     }
 
     stages {
-        stage('prepare') {
-            steps {
-                script {
-                    sh "pip3 install virtualenv"
-                    sh "python3 -m virtualenv poc-venv"
-                    sh "source poc-venv/bin/activate && pip3 install invoke rich"
-                }
-            }
-        }
         stage('build') {
             steps {
                 script {
                     node(params.X86_NODE_PARAM) {
+                        sh "pip3 install virtualenv"
+                        sh "python3 -m virtualenv poc-venv"
+                        sh "source poc-venv/bin/activate && pip3 install invoke rich"
                         if (params.TEST_EXISTING_AMI_ID == '') {
                             sh "poc-venv/bin/invoke ami.build --repo ${params.REPO}"
                             amiProperties = readProperties file: "$WORKSPACE/amiId.properties"
