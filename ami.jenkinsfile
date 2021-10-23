@@ -34,7 +34,7 @@ pipeline {
                     }
                     artifactSourceJobNum = params.ARTIFACT_SOURCE_BUILD_NUM ?: Jenkins.instance.getItemByFullName(artifactSourceJob).lastSuccessfulBuild.number.toString()
                     artifactWebUrl = params.ARTIFACT_WEB_URL ?: "latest"
-                    if (!artifactWebUrl || artifactWebUrl == "lastest") {
+                    if (!artifactWebUrl || artifactWebUrl == "latest") {
                         step([  $class: 'CopyArtifact',
                             filter: "00-Build.txt",
                             fingerprintArtifacts: true,
@@ -43,8 +43,9 @@ pipeline {
                             target: WORKSPACE,
                             optional: false
                         ])
-                        sh "cat 00-Build.txt"
+                        artifactWebUrl = sh("grep 'unified-deb-url:' 00-Build.txt | awk '{print \$2}'", returnStdout: true).trim()
                     }
+                    echo "artifactWebUrl:${artifactWebUrl}"
                 }
             }
         }
