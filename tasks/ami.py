@@ -29,6 +29,7 @@ def fetch_repo_url(c, job_name, build_num, artifact_url, distro):
             token = f.read().strip()
         r = requests.get(f'https://jenkins.scylladb.com/view/master/job{job_name}/{build_num}/artifact/00-Build.txt', auth=('syuu1228',token))
         metadata = r.text
+        print(metadata)
         if distro == 'ubuntu:20.04':
             pattern = r'^unified-deb-url: (.+)$'
         elif distro == 'centos:7':
@@ -37,10 +38,14 @@ def fetch_repo_url(c, job_name, build_num, artifact_url, distro):
         if not match:
             raise Exception('repository URL not found')
         artifact_url = match.group(1)
+        print(artifact_url)
     if distro == 'ubuntu:20.04':
-        print(f'http://{artifact_url}scylladb-master/scylla.list')
+        repo_url = f'http://{artifact_url}scylladb-master/scylla.list'
     else:
-        print(f'http://{artifact_url}scylla.repo')
+        repo_url = f'http://{artifact_url}scylla.repo'
+    print(repo_url)
+    with open('repo_url.txt', 'w') as f:
+        f.write(repo_url)
 
 @task()
 def build(c, repo, distro, ami_id):
