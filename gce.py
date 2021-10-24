@@ -40,24 +40,3 @@ if __name__ == '__main__':
         print('GCE build failed')
         sys.exit(1)
     gce_image_name = match.group(1)
-
-    with open('./json_files/gce_variables.json') as f:
-        gce_vars = json.load(f)
-    project_id = gce_vars['project_id']
-    print('project_id:{project_id}')
-
-    dpackager('gcloud auth activate-service-account --key-file $GOOGLE_APPLICATION_CREDENTIALS')
-    dpackager(f'gcloud config set project {project_id}')
-    try:
-        image_info = dpackager(f'gcloud compute images describe {gce_image_name}', capture_output=True, encoding='utf-8').stdout.strip()
-    except subprocess.CalledProcessError as e:
-        print(f'returncode:{e.returncode}')
-        print(f'stdout:{e.stdout}')
-        print(f'stderr:{e.stderr}')
-        raise
-    match = re.search(r'^id: \'(.+)\'$', image_info, flags=re.MULTILINE)
-    if not match:
-        print('Not able to find image id')
-        sys.exit(1)
-    gce_image_id = match.group(1)
-    dpackager(f'gcloud compute images add-iam-policy-binding {gce_image_id} --member="{gce_test_service_account}" --role="roles/compute.imageUser" --project {project_id}"')
