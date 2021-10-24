@@ -140,7 +140,6 @@ pipeline {
 						amiPropertiesFile = "$WORKSPACE/${generalProperties.amiIdFile}"
 						echo "agentAmiWorkDir:${agentAmiWorkDir}"
 						echo "amiPropertiesFile:${amiPropertiesFile}"
-
 						echo "Copy Artifacts"
 						echo "=============="
 						if (buildNewAMI) {
@@ -253,9 +252,9 @@ pipeline {
 							    )
 						    }
 						}
-*/
 						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
 					}
+*/
 				}
 			}
 		}
