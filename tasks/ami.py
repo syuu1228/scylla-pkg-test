@@ -98,7 +98,7 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
 def test(c):
     with open('./amiId.properties') as f:
         properties = f.read()
-    match = re.search(r'^scylla-ami-id: (.+)$', properties, flags.re.MULTILINE)
+    match = re.search(r'^scylla-ami-id: (.+)$', properties, flags=re.MULTILINE)
     if not match:
         raise Exception("Missing AMI ID. Expected property scylla_ami_id on file amiPropertiesFile created on build phase. Can't run tests")
     ami_id = match.group(1)
