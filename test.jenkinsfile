@@ -100,11 +100,12 @@ pipeline {
 		stage('Build AMI') {
 			steps {
 				script {
+/*
 					node('sif') {
 						checkout scm
 						sh "python3 test.py"
 					}
-/*
+*/
 					node(params.X86_NODE_PARAM) {
 						jenkins.checkAndTagAwsInstance(runningUserID)
 						dpackagerAwsCommand = general.setAwsDpackagerCommand ("", gitProperties.scyllaPkgCheckoutDir)
@@ -212,7 +213,7 @@ pipeline {
 							repoUrl = repoUrl + branchProperties.scyllaUnifiedPkgRepo + "/scylla.list"
 							echo "repoUrl:${repoUrl}"
 						}
-
+/*
 						echo "Build AMI"
 						echo "========="
 						if (buildNewAMI) {
@@ -239,7 +240,6 @@ pipeline {
 						if (publishStatus) {
 							error("Could not publish ${generalProperties.buildMetadataFile} (after append ami id).")
 						}
-
 						if (params.RUN_AMI_VERSION_TAG_TEST) {
 						    if (buildNewAMI) {
 							    echo "Test AMI tag version"
@@ -255,8 +255,8 @@ pipeline {
 						    }
 						}
 						git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
-					}
 */
+					}
 				}
 			}
 		}
