@@ -32,7 +32,7 @@ pipeline {
                         sh "python3 -m virtualenv poc-venv"
                         sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
                         sh "poc-venv/bin/invoke ami.build --job-name=${params.ARTIFACT_SOURCE_JOB_NAME} --build-num=${params.ARTIFACT_SOURCE_BUILD_NUM} --artifact-url=${params.ARTIFACT_WEB_URL} --distro=${params.OS_DISTRO} --ami-id=${params.TEST_EXISTING_AMI_ID}"
-                        amiProperties = readProperties file: "$WORKSPACE/amiId.properties"
+                        amiProperties = readFile file: "$WORKSPACE/amiId.properties"
                         archiveArtifacts artifacts: "00-Build.txt"
                         archiveArtifacts artifacts: "ami.log"
                         archiveArtifacts artifacts: "amiId.properties"
@@ -48,15 +48,12 @@ pipeline {
                 script {
                     /* hardcoding node for running SCT */
                     node('aws-sct-builders-us-east-1-new') {
-                        if (amiProperties.scylla_ami_id.isEmpty()) {
-                            currentBuild.result = 'FAILURE'
-                            error("Missing AMI ID. Expected property scylla_ami_id on file amiPropertiesFile created on build phase. Can't run tests")
-                        }
                         checkout scm
+                        writeFile file: "$WORKSPACE/amiId.properties", text: amiProperties
                         sh "pip3 install virtualenv"
                         sh "python3 -m virtualenv poc-venv"
                         sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
-                        sh "poc-venv/bin/invoke ami.test --ami-id=${amiProperties.scylla_ami_id}"
+                        sh "poc-venv/bin/invoke ami.test"
                     }
                 }
             }

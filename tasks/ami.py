@@ -69,7 +69,13 @@ def build(c, job_name, build_num, artifact_url, distro, ami_id):
         f.write(f'ami-base-os: {distro}\n')
 
 @task
-def test(c, ami_id):
+def test(c):
+    with open('./amiId.properties') as f:
+        properties = f.read()
+    match = re.search(r'^scylla-ami-id: (.+)$', properties, flags.re.MULTILINE)
+    if not match:
+        raise Exception("Missing AMI ID. Expected property scylla_ami_id on file amiPropertiesFile created on build phase. Can't run tests")
+    ami_id = match.group(1)
     sct_env = os.environ.copy()
     sct_env['SCT_COLLECT_LOGS'] = 'false'
     sct_env['SCT_CONFIG_FILES'] = 'test-cases/artifacts/ami.yaml'
