@@ -21,6 +21,12 @@ pipeline {
                         sh "python3 -m virtualenv poc-venv"
                         sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
                         sh "poc-venv/bin/invoke scylla.build"
+                        archiveArtifacts artifacts: "scylla/build/release/dist/tar/*.tar.gz"
+                        archiveArtifacts artifacts: "scylla/build/release/redhat/RPMS/**"
+                        archiveArtifacts artifacts: "scylla/build/release/debian/*.deb"
+                        archiveArtifacts artifacts "scylla/tools/**/build/redhat/RPMS/**"
+                        archiveArtifacts artifacts "scylla/tools/**/build/debian/*.deb"
+
                     }
                 }
             }
