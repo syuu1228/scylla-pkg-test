@@ -9,7 +9,6 @@ pipeline {
         string(name: 'TEST_EXISTING_AMI_ID', defaultValue: '', description: 'AMI ID to test. If empty - will build a new AMI')
         booleanParam(name: 'SKIP_TEST', defaultValue: false, description: 'Set to skip ami test - for debug use')
         booleanParam(name: 'RUN_AMI_VERSION_TAG_TEST', defaultValue: false, description: 'Set to run releng AMI version tag verification')
-        booleanParam(name: 'SKIP_COPY', defaultValue: false, description: 'Set to skip copying ami')
     }
 
     agent {

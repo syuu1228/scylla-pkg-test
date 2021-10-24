@@ -84,13 +84,14 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
         ami_env = os.environ.copy()
         ami_env['DPACKAGER_TOOL'] = 'podman'
         ami_env['DOCKER_IMAGE'] = 'image_fedora-33'
-        res = c.run(f'./tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- aws ec2 --region us-east-1 describe-tags --filters Name=resource-id,Values={ami_id} Name=key,Values=ScyllaVersion', env=ami_env)
-        match = re.search(rf'^\s+"Value": "(.+)"$', res.stdout, flags=re.MULTILINE)
-        value = match.group(1)
-        if value.startswith(f'{scylla_version}-{scylla_release}'):
-            print(f'Success: AMI tag version: |{value}|. Contains |{scylla_version}| and |{scylla_release}| as expected')
+        res = c.run(f'./tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- bash -c "aws ec2 --region us-east-1 describe-tags --filters Name=resource-id,Values={ami_id} Name=key,Values=ScyllaVersion > version_tag.json"', env=ami_env)
+        with open('version_tag.json') as f:
+            version_tag_json = json.loads(f.read())
+        version_tag = version_tag_json['Tags'][0]['Value']
+        if version_tag.startswith(f'{scylla_version}-{scylla_release}'):
+            print(f'Success: AMI tag version: |{version_tag}|. Contains |{scylla_version}| and |{scylla_release}| as expected')
         else:
-            raise Exception(f'AMI tag version: |{value}|. Does not contain |{scylla_version}| and |{scylla_release}| as expected')
+            raise Exception(f'AMI tag version: |{version_tag}|. Does not contain |{scylla_version}| and |{scylla_release}| as expected')
 
 
 @task
