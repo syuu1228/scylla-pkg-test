@@ -8,8 +8,10 @@ from rich import print  # pylint: disable=redefined-builtin
 from rich.console import Console
 import requests
 import json
+from pathlib import Path
 
 console = Console(color_system=None)
+workspace = str(Path(__file__).parent.parent)
 
 def get_value_from_metadata(metadata, tag):
     match = re.search(rf'^{tag}: (.+)$', metadata, re.MULTILINE)
@@ -64,7 +66,7 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
             ami_env['DOCKER_IMAGE'] = 'image_fedora-33'
             script_name = './build_ami.sh'
         with c.cd('./scylla-machine-image/aws/ami'):
-            c.run(f'../../../tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- {script_name} --product scylla --repo {repo_url} --log-file ../../../ami.log', env=ami_env)
+            c.run(f'{workspace}/tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- {script_name} --product scylla --repo {repo_url} --log-file {workspace}/ami.log', env=ami_env)
         with open('./ami.log') as f:
             ami_log = f.read()
         match = re.search(r'^us-east-1: (.+)$', ami_log, flags=re.MULTILINE)
@@ -98,7 +100,8 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
 def test(c):
     with open('./amiId.properties') as f:
         properties = f.read()
-    match = re.search(r'^scylla-ami-id: (.+)$', properties, flags=re.MULTILINE)
+    print(properties)
+    match = re.search(r'^scylla-ami-id=(.+)$', properties, flags=re.MULTILINE)
     if not match:
         raise Exception("Missing AMI ID. Expected property scylla_ami_id on file amiPropertiesFile created on build phase. Can't run tests")
     ami_id = match.group(1)
