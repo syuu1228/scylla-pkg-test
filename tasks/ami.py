@@ -21,7 +21,7 @@ def fetch_repo_url(c, job_name, build_num, artifact_url, distro):
         if not job_name:
             if distro == 'ubuntu:20.04':
                 job_name = '/scylla-master/job/unified-deb'
-            elif distro = 'centos:7':
+            elif distro == 'centos:7':
                 job_name = '/scylla-master/job/centos-rpm'
         if not build_num:
             build_num = 'lastSuccessfulBuild'
