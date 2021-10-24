@@ -65,20 +65,6 @@ pipeline {
                 }
             }
         }
-        stage('copy') {
-            expression {! params.SKIP_COPY}
-            steps {
-                script {
-                    node('packager') {
-                        checkout scm
-                        sh "pip3 install virtualenv"
-                        sh "python3 -m virtualenv poc-venv"
-                        sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
-//                        sh "poc-venv/bin/invoke ami.copy"
-                    }
-                }
-            }
-        }
     }
     post {
         always {
