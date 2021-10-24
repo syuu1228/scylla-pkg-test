@@ -33,7 +33,7 @@ pipeline {
                         sh "python3 -m virtualenv poc-venv"
                         sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
                         sh(script: "poc-venv/bin/invoke ami.fetch-repo-url --job-name=${params.ARTIFACT_SOURCE_JOB_NAME} --build-num=${params.ARTIFACT_SOURCE_BUILD_NUM} --artifact-url=${params.ARTIFACT_WEB_URL} --distro=${params.OS_DISTRO}")
-                        repoUrl = readFile(file: repo_url.txt).trim()
+                        repoUrl = readFile(file: "repo_url.txt").trim()
                         echo "repoUrl:[${repoUrl}]"
                     }
                 }
