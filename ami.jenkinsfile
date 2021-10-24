@@ -32,7 +32,7 @@ pipeline {
                         sh "pip3 install virtualenv"
                         sh "python3 -m virtualenv poc-venv"
                         sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
-                        repoUrl = sh(script: "poc-venv/bin/invoke ami.fetch-repo-url --job-name ${params.ARTIFACT_SOURCE_JOB_NAME} --build-num ${params.ARTIFACT_SOURCE_BUILD_NUM} --artifact-url ${params.ARTIFACT_WEB_URL} --distro ${params.OS_DISTRO}", returnStdout: true)
+                        repoUrl = sh(script: "poc-venv/bin/invoke ami.fetch-repo-url --job-name=${params.ARTIFACT_SOURCE_JOB_NAME} --build-num=${params.ARTIFACT_SOURCE_BUILD_NUM} --artifact-url=${params.ARTIFACT_WEB_URL} --distro=${params.OS_DISTRO}", returnStdout: true)
                     }
                 }
             }
@@ -45,9 +45,9 @@ pipeline {
                         sh "pip3 install virtualenv"
                         sh "python3 -m virtualenv poc-venv"
                         sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
-                        buildArgs = "--repo ${repoUrl} --distro ${params.OS_DISTRO}"
+                        buildArgs = "--repo=${repoUrl} --distro=${params.OS_DISTRO}"
                         if (params.TEST_EXISTING_AMI_ID) {
-                            buildArgs += " --ami-id ${params.TEST_EXISTING_AMI_ID}"
+                            buildArgs += " --ami-id=${params.TEST_EXISTING_AMI_ID}"
                         }
                         sh "poc-venv/bin/invoke ami.build $buildArgs"
                         amiProperties = readProperties file: "$WORKSPACE/amiId.properties"
@@ -72,7 +72,7 @@ pipeline {
                         sh "pip3 install virtualenv"
                         sh "python3 -m virtualenv poc-venv"
                         sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
-                        sh "poc-venv/bin/invoke ami.test --ami-id ${amiProperties.scylla_ami_id}"
+                        sh "poc-venv/bin/invoke ami.test --ami-id=${amiProperties.scylla_ami_id}"
                     }
                 }
             }

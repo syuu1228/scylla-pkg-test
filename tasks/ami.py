@@ -27,8 +27,8 @@ def fetch_repo_url(c, job_name, build_num, artifact_url, distro):
             build_num = 'lastSuccessfulBuild'
         with open('/var/tmp/takuya-api-token.txt') as f:
             token = f.read().strip()
-        r = requests.get(f'https://jenkins.scylladb.com/view/master/job${job_name}/${build_num}/artifact/00-Build.txt', auth=('syuu1228',token))
-        build_info = r.text
+        r = requests.get(f'https://jenkins.scylladb.com/view/master/job{job_name}/{build_num}/artifact/00-Build.txt', auth=('syuu1228',token))
+        metadata = r.text
         if distro == 'ubuntu:20.04':
             pattern = r'^unified-deb-url: (.+)$'
         elif distro == 'centos:7':
@@ -38,9 +38,9 @@ def fetch_repo_url(c, job_name, build_num, artifact_url, distro):
             raise Exception('repository URL not found')
         artifact_url = match.group(1)
     if distro == 'ubuntu:20.04':
-        print(f'http://{artifact_url}/scylladb-master/scylla.list')
+        print(f'http://{artifact_url}scylladb-master/scylla.list')
     else:
-        print(f'http://{artifact_url}/scylla.repo')
+        print(f'http://{artifact_url}scylla.repo')
 
 @task()
 def build(c, repo, distro, ami_id):
