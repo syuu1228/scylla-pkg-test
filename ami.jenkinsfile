@@ -27,25 +27,14 @@ pipeline {
         stage('prepare') {
             steps {
                 script {
-                    if (params.OS_DISTRO == "centos:7") {
-                        artifactSourceJob = params.ARTIFACT_SOURCE_JOB_NAME ?: "/scylla-master/centos-rpm"
-                    } else {
-                        artifactSourceJob = params.ARTIFACT_SOURCE_JOB_NAME ?: "/scylla-master/unified-deb"
+                    /* XXX: this is workaround because my account does not have enough privilege to save credential on jenkins server */
+                    node('sif') {
+                        checkout scm
+                        sh "pip3 install virtualenv"
+                        sh "python3 -m virtualenv poc-venv"
+                        sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
+                        repoUrl = sh(script: "poc-venv/bin/invoke ami.fetch-repo-url --job-name ${params.ARTIFACT_SOURCE_JOB_NAME} --build-num ${params.ARTIFACT_SOURCE_BUILD_NUM} --artifact-url ${params.ARTIFACT_WEB_URL} --distro ${params.OS_DISTRO}", returnStdout: true)
                     }
-                    artifactSourceJobNum = params.ARTIFACT_SOURCE_BUILD_NUM ?: Jenkins.instance.getItemByFullName(artifactSourceJob).lastSuccessfulBuild.number.toString()
-                    artifactWebUrl = params.ARTIFACT_WEB_URL ?: "latest"
-                    if (!artifactWebUrl || artifactWebUrl == "latest") {
-                        step([  $class: 'CopyArtifact',
-                            filter: "00-Build.txt",
-                            fingerprintArtifacts: true,
-                            projectName: artifactSourceJob,
-                            selector: [$class: 'SpecificBuildSelector', buildNumber: artifactSourceJobNum],
-                            target: WORKSPACE,
-                            optional: false
-                        ])
-                        artifactWebUrl = sh(script: "grep 'unified-deb-url:' 00-Build.txt | awk '{print \$2}'", returnStdout: true).trim()
-                    }
-                    echo "artifactWebUrl:${artifactWebUrl}"
                 }
             }
         }
@@ -56,14 +45,13 @@ pipeline {
                         checkout scm
                         sh "pip3 install virtualenv"
                         sh "python3 -m virtualenv poc-venv"
-                        sh "source poc-venv/bin/activate && pip3 install invoke rich"
-                        if (params.TEST_EXISTING_AMI_ID == '') {
-                            sh "poc-venv/bin/invoke ami.build --repo ${params.REPO} --distro ${params.OS_DISTRO}"
-                            amiProperties = readProperties file: "$WORKSPACE/amiId.properties"
-                        } else {
-                            sh "poc-venv/bin/invoke ami.generate-properties --ami-id ${params.TEST_EXISTING_AMI_ID}"
-                            amiProperties = readProperties file: "$WORKSPACE/amiId.properties"
+                        sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
+                        buildArgs = "--repo ${repoUrl} --distro ${params.OS_DISTRO}"
+                        if (params.TEST_EXISTING_AMI_ID) {
+                            buildArgs += " --ami-id ${params.TEST_EXISTING_AMI_ID}"
                         }
+                        sh "poc-venv/bin/invoke ami.build $buildArgs"
+                        amiProperties = readProperties file: "$WORKSPACE/amiId.properties"
                     }
                 }
             }
@@ -74,6 +62,8 @@ pipeline {
             }
             steps {
                 script {
+                    /* XXX: looks like SCT for AMI need to run specific IP or machine, hardcoded target.
+                       note that original ami.jenkinsfile just invoke other jenkins job to run AMI test, but here we implemented it in python script for evaluating multiple stage job */
                     node('aws-sct-builders-us-east-1-new') {
                         if (amiProperties.scylla_ami_id.isEmpty()) {
                             currentBuild.result = 'FAILURE'
@@ -82,7 +72,7 @@ pipeline {
                         checkout scm
                         sh "pip3 install virtualenv"
                         sh "python3 -m virtualenv poc-venv"
-                        sh "source poc-venv/bin/activate && pip3 install invoke rich"
+                        sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
                         sh "poc-venv/bin/invoke ami.test --ami-id ${amiProperties.scylla_ami_id}"
                     }
                 }
