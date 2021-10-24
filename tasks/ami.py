@@ -101,7 +101,7 @@ def test(c):
     with open('./amiId.properties') as f:
         properties = f.read()
     print(properties)
-    match = re.search(r'^scylla-ami-id=(.+)$', properties, flags=re.MULTILINE)
+    match = re.search(r'^scylla_ami_id=(.+)$', properties, flags=re.MULTILINE)
     if not match:
         raise Exception("Missing AMI ID. Expected property scylla_ami_id on file amiPropertiesFile created on build phase. Can't run tests")
     ami_id = match.group(1)
