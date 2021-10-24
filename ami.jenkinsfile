@@ -5,7 +5,6 @@ pipeline {
         string(name: 'ARTIFACT_SOURCE_JOB_NAME', defaultValue: '', description: 'Build path to take artifacts from (usually unified-deb). Use with ARTIFACT_SOURCE_BUILD_NUM to take artifacts from Jenkins, or ARTIFACT_WEB_URL to take them from cloud.')
         string(name: 'ARTIFACT_SOURCE_BUILD_NUM', defaultValue: '', description: 'Build number to take artifacts from. Leave empty to use last available build. Use with ARTIFACT_SOURCE_JOB_NAME to take artifacts from Jenkins, or ARTIFACT_WEB_URL to take them from cloud.')
         string(name: 'ARTIFACT_WEB_URL', defaultValue: 'latest', description: 'URL of deb (or RPM) repo created by unified-deb (or CentOS-RPM) process. Use when not available on jenkins, or when running on AWS, which will download faster from S3.')
-        string(name: 'X86_NODE_PARAM', defaultValue: 'packager', description: 'On which node to run the ami build. Useful options: packager,loki,dgccd201,thor,ran,huginn,muninn.')
 		choice(name: 'OS_DISTRO', choices: ['ubuntu:20.04', 'centos:7'], description: 'Choose on which OS the AMI will be build. Please note that centos:7 is kept for end cases manual use')
         string(name: 'TEST_EXISTING_AMI_ID', defaultValue: '', description: 'AMI ID to test. If empty - will build a new AMI')
         booleanParam(name: 'SKIP_TEST', defaultValue: false, description: 'Set to skip ami test - for debug use')
@@ -23,32 +22,20 @@ pipeline {
     }
 
     stages {
-        stage('prepare') {
+        stage('build') {
             steps {
                 script {
-                    /* XXX: this is workaround because my account does not have enough privilege to save credential on jenkins server */
+                    /* hardcoding node for getting locally saved api token */
                     node('sif') {
                         checkout scm
                         sh "pip3 install virtualenv"
                         sh "python3 -m virtualenv poc-venv"
                         sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
-                        sh(script: "poc-venv/bin/invoke ami.fetch-repo-url --job-name=${params.ARTIFACT_SOURCE_JOB_NAME} --build-num=${params.ARTIFACT_SOURCE_BUILD_NUM} --artifact-url=${params.ARTIFACT_WEB_URL} --distro=${params.OS_DISTRO}")
-                        repoUrl = readFile(file: "repo_url.txt").trim()
-                        echo "repoUrl:[${repoUrl}]"
-                    }
-                }
-            }
-        }
-        stage('build') {
-            steps {
-                script {
-                    node(params.X86_NODE_PARAM) {
-                        checkout scm
-                        sh "pip3 install virtualenv"
-                        sh "python3 -m virtualenv poc-venv"
-                        sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
-                        sh "poc-venv/bin/invoke ami.build --repo=${repoUrl} --distro=${params.OS_DISTRO} --ami-id=${params.TEST_EXISTING_AMI_ID}"
+                        sh "poc-venv/bin/invoke ami.build --job-name=${params.ARTIFACT_SOURCE_JOB_NAME} --build-num=${params.ARTIFACT_SOURCE_BUILD_NUM} --artifact-url=${params.ARTIFACT_WEB_URL} --distro=${params.OS_DISTRO} --ami-id=${params.TEST_EXISTING_AMI_ID}"
                         amiProperties = readProperties file: "$WORKSPACE/amiId.properties"
+                        archiveArtifacts artifacts: "00-Build.txt"
+                        archiveArtifacts artifacts: "ami.log"
+                        archiveArtifacts artifacts: "amiId.properties"
                     }
                 }
             }
@@ -59,8 +46,7 @@ pipeline {
             }
             steps {
                 script {
-                    /* XXX: looks like SCT for AMI need to run specific IP or machine, hardcoded target.
-                       note that original ami.jenkinsfile just invoke other jenkins job to run AMI test, but here we implemented it in python script for evaluating multiple stage job */
+                    /* hardcoding node for running SCT */
                     node('aws-sct-builders-us-east-1-new') {
                         if (amiProperties.scylla_ami_id.isEmpty()) {
                             currentBuild.result = 'FAILURE'
