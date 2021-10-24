@@ -101,6 +101,7 @@ pipeline {
 			steps {
 				script {
 					node('sif') {
+						checkout scm
 						sh "python3 test.py"
 					}
 /*
