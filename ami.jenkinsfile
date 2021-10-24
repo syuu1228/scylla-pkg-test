@@ -8,6 +8,8 @@ pipeline {
 		choice(name: 'OS_DISTRO', choices: ['ubuntu:20.04', 'centos:7'], description: 'Choose on which OS the AMI will be build. Please note that centos:7 is kept for end cases manual use')
         string(name: 'TEST_EXISTING_AMI_ID', defaultValue: '', description: 'AMI ID to test. If empty - will build a new AMI')
         booleanParam(name: 'SKIP_TEST', defaultValue: false, description: 'Set to skip ami test - for debug use')
+        booleanParam(name: 'RUN_AMI_VERSION_TAG_TEST', defaultValue: false, description: 'Set to run releng AMI version tag verification')
+        booleanParam(name: 'SKIP_COPY', defaultValue: false, description: 'Set to skip copying ami')
     }
 
     agent {
@@ -31,7 +33,12 @@ pipeline {
                         sh "pip3 install virtualenv"
                         sh "python3 -m virtualenv poc-venv"
                         sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
-                        sh "poc-venv/bin/invoke ami.build --job-name=${params.ARTIFACT_SOURCE_JOB_NAME} --build-num=${params.ARTIFACT_SOURCE_BUILD_NUM} --artifact-url=${params.ARTIFACT_WEB_URL} --distro=${params.OS_DISTRO} --ami-id=${params.TEST_EXISTING_AMI_ID}"
+                        if (params.RUN_AMI_VERSION_TAG_TEST) {
+                            tagTest = '--tag-test'
+                        } else {
+                            tagTest = '--no-tag-test'
+                        }
+                        sh "poc-venv/bin/invoke ami.build --job-name=${params.ARTIFACT_SOURCE_JOB_NAME} --build-num=${params.ARTIFACT_SOURCE_BUILD_NUM} --artifact-url=${params.ARTIFACT_WEB_URL} --distro=${params.OS_DISTRO} --test-existing-ami-id=${params.TEST_EXISTING_AMI_ID} ${tagTest}"
                         amiProperties = readFile file: "$WORKSPACE/amiId.properties"
                         archiveArtifacts artifacts: "00-Build.txt"
                         archiveArtifacts artifacts: "ami.log"
@@ -54,6 +61,20 @@ pipeline {
                         sh "python3 -m virtualenv poc-venv"
                         sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
                         sh "poc-venv/bin/invoke ami.test"
+                    }
+                }
+            }
+        }
+        stage('copy') {
+            expression {! params.SKIP_COPY}
+            steps {
+                script {
+                    node('packager') {
+                        checkout scm
+                        sh "pip3 install virtualenv"
+                        sh "python3 -m virtualenv poc-venv"
+                        sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
+//                        sh "poc-venv/bin/invoke ami.copy"
                     }
                 }
             }

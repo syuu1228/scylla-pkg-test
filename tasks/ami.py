@@ -7,15 +7,26 @@ from invoke import task, Collection
 from rich import print  # pylint: disable=redefined-builtin
 from rich.console import Console
 import requests
+import json
 
 console = Console(color_system=None)
 
-@task()
-def build(c, job_name, build_num, artifact_url, distro, ami_id):
+def get_value_from_metadata(metadata, tag):
+    match = re.search(rf'^{tag}: (.+)$', metadata, re.MULTILINE)
+    if not match:
+        raise Exception(f'{tag} not found')
+    return match.group(1)
+
+@task
+def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, tag_test=True):
     if distro != 'ubuntu:20.04' and distro != 'centos:7':
         raise Exception('Unsupported distro')
-    if not ami_id:
-        if artifact_url == 'latest':
+    if not test_existing_ami_id:
+        if artifact_url != 'latest':
+            r = requests.get(f'http://{artifact_url}/00-Build.txt')
+            r.raise_for_status()
+            metadata = r.text
+        else:
             if not job_name:
                 if distro == 'ubuntu:20.04':
                     job_name = '/scylla-master/job/unified-deb'
@@ -26,18 +37,17 @@ def build(c, job_name, build_num, artifact_url, distro, ami_id):
             with open('/var/tmp/takuya-api-token.txt') as f:
                 token = f.read().strip()
             r = requests.get(f'https://jenkins.scylladb.com/view/master/job{job_name}/{build_num}/artifact/00-Build.txt', auth=('syuu1228',token))
+            r.raise_for_status()
             metadata = r.text
-            with open('./00-Build.txt', 'w') as f:
-                f.write(metadata)
-            print('[00-Build.txt]\n{}\n'.format(metadata))
-            if distro == 'ubuntu:20.04':
-                pattern = r'^unified-deb-url: (.+)$'
-            else:
-                pattern = r'^centos-rpm-url: (.+)$'
-            match = re.search(pattern, metadata, flags=re.MULTILINE)
-            if not match:
-                raise Exception('repository URL not found')
-            artifact_url = match.group(1)
+        with open('./00-Build.txt', 'w') as f:
+            f.write(metadata)
+        print('[00-Build.txt]\n{}\n'.format(metadata))
+        scylla_release = get_value_from_metadata(metadata, 'scylla-release')
+        scylla_version = get_value_from_metadata(metadata, 'scylla-version')
+        if distro == 'ubuntu:20.04':
+            artifact_url = get_value_from_metadata(metadata, 'unified-deb-url')
+        else:
+            artifact_url = get_value_from_metadata(metadata, 'centos-rpm-url')
         if distro == 'ubuntu:20.04':
             repo_url = f'http://{artifact_url}scylladb-master/scylla.list'
         else:
@@ -61,12 +71,27 @@ def build(c, job_name, build_num, artifact_url, distro, ami_id):
         if not match:
             raise Exception('AMI build failed')
         ami_id = match.group(1)
+    else:
+        ami_id = test_existing_ami_id
 
     with open('./amiId.properties', 'w') as f:
         f.write(f'scylla_ami_id={ami_id}\n')
     with open('./00-Build.txt', 'a') as f:
         f.write(f'scylla-ami-id: {ami_id}\n')
         f.write(f'ami-base-os: {distro}\n')
+
+    if not test_existing_ami_id and tag_test:
+        ami_env = os.environ.copy()
+        ami_env['DPACKAGER_TOOL'] = 'podman'
+        ami_env['DOCKER_IMAGE'] = 'image_fedora-33'
+        res = c.run(f'./tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- aws ec2 --region us-east-1 describe-tags --filters Name=resource-id,Values={ami_id} Name=key,Values=ScyllaVersion', env=ami_env)
+        match = re.search(rf'^\s+"Value": "(.+)"$', res.stdout, flags=re.MULTILINE)
+        value = match.group(1)
+        if value.startswith(f'{scylla_version}-{scylla_release}'):
+            print(f'Success: AMI tag version: |{value}|. Contains |{scylla_version}| and |{scylla_release}| as expected')
+        else:
+            raise Exception(f'AMI tag version: |{value}|. Does not contain |{scylla_version}| and |{scylla_release}| as expected')
+
 
 @task
 def test(c):
