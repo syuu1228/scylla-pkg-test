@@ -4,3 +4,6 @@
 [submodule "scylla-cluster-tests"]
 	path = scylla-cluster-tests
 	url = git@github.com:scylladb/scylla-cluster-tests.git
+[submodule "scylla"]
+	path = scylla
+	url = git@github.com:scylladb/scylla.git

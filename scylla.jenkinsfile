@@ -1,0 +1,28 @@
+#!groovy
+
+pipeline {
+    parameters {
+        booleanParam(name: 'SKIP_TEST', defaultValue: false, description: 'Set to skip ami test - for debug use')
+    }
+
+    agent {
+        label {
+            label 'built-in'
+        }
+    }
+
+     stages {
+        stage('build') {
+            steps {
+                script {
+                    node('packager') {
+                        sh "pip3 install virtualenv"
+                        sh "python3 -m virtualenv poc-venv"
+                        sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
+                        sh "poc-venv/bin/invoke scylla.build"
+                    }
+                }
+            }
+        }
+    }
+}
