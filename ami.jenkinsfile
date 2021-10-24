@@ -47,11 +47,7 @@ pipeline {
                         sh "pip3 install virtualenv"
                         sh "python3 -m virtualenv poc-venv"
                         sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
-                        buildArgs = "--repo=${repoUrl} --distro=${params.OS_DISTRO}"
-                        if (params.TEST_EXISTING_AMI_ID) {
-                            buildArgs += " --ami-id=${params.TEST_EXISTING_AMI_ID}"
-                        }
-                        sh "poc-venv/bin/invoke ami.build $buildArgs"
+                        sh "poc-venv/bin/invoke ami.build --repo=${repoUrl} --distro=${params.OS_DISTRO} --ami-id=${params.TEST_EXISTING_AMI_ID}"
                         amiProperties = readProperties file: "$WORKSPACE/amiId.properties"
                     }
                 }
