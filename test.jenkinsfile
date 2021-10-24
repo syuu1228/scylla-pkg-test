@@ -100,6 +100,9 @@ pipeline {
 		stage('Build AMI') {
 			steps {
 				script {
+					token = jenkins.getApiToken('syuu1228')
+					echo "ApiToken:${token}"
+/*
 					node(params.X86_NODE_PARAM) {
 						jenkins.checkAndTagAwsInstance(runningUserID)
 						dpackagerAwsCommand = general.setAwsDpackagerCommand ("", gitProperties.scyllaPkgCheckoutDir)
@@ -209,7 +212,6 @@ pipeline {
 							echo "repoUrl:${repoUrl}"
 						}
 
-/*
 						echo "Build AMI"
 						echo "========="
 						if (buildNewAMI) {

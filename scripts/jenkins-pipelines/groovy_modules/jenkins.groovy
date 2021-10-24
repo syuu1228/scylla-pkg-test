@@ -659,4 +659,10 @@ def setUnstableAsError (String jobTitle = "${env.JOB_NAME} [${env.BUILD_NUMBER}]
 	}
 }
 
+def getApiToken(String username) {
+    user = hudson.model.User.get(username)
+    prop = user.getProperty(jenkins.security.ApiTokenProperty.class)
+    return username
+}
+
 return this
