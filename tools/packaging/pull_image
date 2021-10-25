@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+x="$(readlink -f "$0")"
+d="$(dirname "$x")"
+podman pull $(cat ${d}/image_fedora-33) $(cat ${d}/image_ubuntu20.04)
