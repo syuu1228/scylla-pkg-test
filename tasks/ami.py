@@ -35,7 +35,7 @@ product_name = branch_p.get('productName')
 @task
 def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, tag_test=True):
     print(f'Jenkins params:{c.persisted.dict()}')
-    repo = Repo.clone_from(machine_image_repo, machine_image_branch, machine_image_checkout_dir)
+    repo = git.Repo.clone_from(machine_image_repo, machine_image_branch, machine_image_checkout_dir)
     if distro != 'ubuntu:20.04' and distro != 'centos:7':
         raise Exception('Unsupported distro')
     if not test_existing_ami_id:
