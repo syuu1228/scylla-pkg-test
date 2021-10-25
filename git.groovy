@@ -79,6 +79,11 @@ def checkoutToDir(String gitURL, String branch, String checkoutDir = WORKSPACE, 
 	}
 }
 
+String gitRevParse (String branch) {
+	def sha = sh(returnStdout: true, script: "git rev-parse ${branch}").trim()
+	return sha
+}
+
 def cleanWorkSpaceUponRequest(boolean preserveWorkSpace = false) {
 	echo "Cleaning workspace |$WORKSPACE|, Node: |$NODE_NAME|"
 	if (preserveWorkSpace) {
