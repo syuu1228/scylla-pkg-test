@@ -55,7 +55,7 @@ def dpackager(cmdline, topdir, image='image_fedora-33', env_export={}, env_overw
 
 @task
 def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, tag_test=True):
-    settings = AmiSetings()
+    settings = AmiSettings()
     config = c.persisted
     config.clear()
     config.update(**setting.dict())
