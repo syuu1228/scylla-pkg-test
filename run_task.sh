@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+echo $AWS_SECRET_ACCESS_KEY
 ./tools/packaging/pull_image
 pip3 install virtualenv
 python3 -m virtualenv poc-venv

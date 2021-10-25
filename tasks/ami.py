@@ -8,6 +8,7 @@ import requests
 import json
 import subprocess
 from pathlib import Path
+from scylla_arms.config import Settings
 from scylla_arms.configparser import properties_parser, build_metadata_parser
 
 machine_image_repo = 'git@github.com:scylladb/scylla-machine-image.git'
@@ -29,11 +30,18 @@ centos_job_name = branch_p.get('centosJobName')
 scylla_unified_pkg_repo = branch_p.get('scyllaUnifiedPkgRepo')
 product_name = branch_p.get('productName')
 
+class AmiSettings(Settings):
+    skip_test: bool
+    artifact_source_job_name: str
+    artifact_source_build_num: str
+    artifact_web_url: str
+
 def dpackager(cmdline, topdir, image='image_fedora-33', env_export={}, env_overwrite=[], cwd=None, capture_output=False):
     denv = os.environ.copy()
     denv['DPACKAGER_TOOL'] = 'podman'
     denv['DOCKER_IMAGE'] = image
     denv.update(env_overwrite)
+    print(f'denv:\n{denv.dict()}')
     env_export_arg=''
     for e in env_export:
         env_export_arg = f' -e {e}=${e}'
@@ -47,7 +55,14 @@ def dpackager(cmdline, topdir, image='image_fedora-33', env_export={}, env_overw
 
 @task
 def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, tag_test=True):
-    print(f'Jenkins params:{c.persisted.dict()}')
+    settings = AmiSetings()
+    config = c.persisted
+    config.clear()
+    config.update(**setting.dict())
+    print(f'configuration:\n{config.dict()}')
+    c.persisted.update(os.environ['JENKINS_PARAMS'])
+    print(f'ENV:\n{os.environ}')
+    print(f'Jenkins params:\n{c.persisted.dict()}')
     if distro != 'ubuntu:20.04' and distro != 'centos:7':
         raise Exception('Unsupported distro')
     if not test_existing_ami_id:
