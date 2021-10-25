@@ -95,7 +95,7 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
         print(f'repo_url:{repo_url}')
 
         shutil.copyfile('./json_files/ami_variables.json', './scylla-machine-image/aws/ami/variables.json')
-        build_dir='{topdir}/scylla-machine-image/aws/ami'
+        build_dir=f'{topdir}/scylla-machine-image/aws/ami'
         if distro == 'ubuntu:20.04':
             dpackager_image = 'image_ubuntu20.04'
             script_name = f'{build_dir}/build_deb_ami.sh'
