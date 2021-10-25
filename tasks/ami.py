@@ -6,16 +6,15 @@ import shutil
 from invoke import task, Collection
 import requests
 import json
-import subprocess
 from pathlib import Path
-from scylla_arms.config import Settings
 from scylla_arms.configparser import properties_parser, build_metadata_parser
 
 machine_image_repo = 'git@github.com:scylladb/scylla-machine-image.git'
 machine_image_branch = 'master'
 machine_image_checkout_dir = 'scylla-machine-image'
 
-topdir = str(Path(__file__).parent.parent)
+console = Console(color_system=None)
+workspace = str(Path(__file__).parent.parent)
 
 general_p = properties_parser('general.properties')
 branch_p = properties_parser('branch-specific.properties')
@@ -30,23 +29,10 @@ centos_job_name = branch_p.get('centosJobName')
 scylla_unified_pkg_repo = branch_p.get('scyllaUnifiedPkgRepo')
 product_name = branch_p.get('productName')
 
-class AmiSettings(Settings):
-    skip_test: bool
-    artifact_source_job_name: str = ''
-    artifact_source_build_num: str = ''
-    artifact_web_url: str
-
 @task
 def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, tag_test=True):
-#    settings = AmiSettings()
-#    config = c.persisted
-#    config.clear()
-#    config.update(**settings.dict())
-#    print(f'configuration:\n{config.dict()}')
-#    print(f'ENV:\n{os.environ}')
     if distro != 'ubuntu:20.04' and distro != 'centos:7':
         raise Exception('Unsupported distro')
-    c.run('./tools/packaging/pull_image')
     if not test_existing_ami_id:
         if artifact_url != 'latest':
             r = requests.get(f'http://{artifact_url}/{build_metadata_file}')
@@ -79,17 +65,16 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
         print(f'repo_url:{repo_url}')
 
         shutil.copyfile('./json_files/ami_variables.json', './scylla-machine-image/aws/ami/variables.json')
-        if distro == 'ubuntu:20.04':
-            dpackager_image = 'image_ubuntu20.04'
-            script_name = './build_deb_ami.sh'
-        else:
-            dpackager_image = 'image_fedora-33'
-            script_name = f'./build_ami.sh'
         ami_env = os.environ.copy()
         ami_env['DPACKAGER_TOOL'] = 'podman'
-        ami_env['DOCKER_IMAGE'] = dpackager_image
+        if distro == 'ubuntu:20.04':
+            ami_env['DOCKER_IMAGE'] = 'image_ubuntu20.04'
+            script_name = './build_deb_ami.sh'
+        else:
+            ami_env['DOCKER_IMAGE'] = 'image_fedora-33'
+            script_name = './build_ami.sh'
         with c.cd('./scylla-machine-image/aws/ami'):
-            c.run(f'{topdir}/tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- {script_name} --product {product_name} --repo {repo_url} --log-file {topdir}/ami.log', env=ami_env)
+            c.run(f'{workspace}/tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- {script_name} --product {product_name} --repo {repo_url} --log-file {workspace}/ami.log', env=ami_env)
         with open('./ami.log') as f:
             ami_log = f.read()
         match = re.search(r'^us-east-1: (.+)$', ami_log, flags=re.MULTILINE)
@@ -110,8 +95,9 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
         ami_env = os.environ.copy()
         ami_env['DPACKAGER_TOOL'] = 'podman'
         ami_env['DOCKER_IMAGE'] = 'image_fedora-33'
-        version_tag_json_txt = c.run(f'./tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- bash -c "aws ec2 --region {ami_default_test_region} describe-tags --filters Name=resource-id,Values={ami_id} Name=key,Values=ScyllaVersion"', env=ami_env).stdout
-        version_tag_json = json.loads(version_tag_json_txt)
+        res = c.run(f'./tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- bash -c "aws ec2 --region {ami_default_test_region} describe-tags --filters Name=resource-id,Values={ami_id} Name=key,Values=ScyllaVersion > version_tag.json"', env=ami_env)
+        with open('version_tag.json') as f:
+            version_tag_json = json.loads(f.read())
         version_tag = version_tag_json['Tags'][0]['Value']
         if version_tag.startswith(f'{scylla_version}-{scylla_release}'):
             print(f'Success: AMI tag version: |{version_tag}|. Contains |{scylla_version}| and |{scylla_release}| as expected')
