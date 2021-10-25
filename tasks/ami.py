@@ -9,7 +9,7 @@ from rich.console import Console
 import requests
 import json
 from pathlib import Path
-from libs.configparser import properties_parser, build_metadata_parser
+from scylla_arms.configparser import properties_parser, build_metadata_parser
 
 console = Console(color_system=None)
 workspace = str(Path(__file__).parent.parent)
@@ -27,14 +27,9 @@ centos_job_name = branch_p.get('centosJobName')
 scylla_unified_pkg_repo = branch_p.get('scyllaUnifiedPkgRepo')
 product_name = branch_p.get('productName')
 
-def get_value_from_metadata(metadata, tag):
-    match = re.search(rf'^{tag}: (.+)$', metadata, re.MULTILINE)
-    if not match:
-        raise Exception(f'{tag} not found')
-    return match.group(1)
-
 @task
 def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, tag_test=True):
+    print(f'Jenkins params:{c.persisted.dict()}')
     if distro != 'ubuntu:20.04' and distro != 'centos:7':
         raise Exception('Unsupported distro')
     if not test_existing_ami_id:
