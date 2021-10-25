@@ -28,9 +28,21 @@ centos_job_name = branch_p.get('centosJobName')
 scylla_unified_pkg_repo = branch_p.get('scyllaUnifiedPkgRepo')
 product_name = branch_p.get('productName')
 
+def dpackager(cmdline, workspace, image='image_fedora-33', env_export={}, env_overwrite=[], cwd=None, capture_output=False):
+    denv = os.environ.copy()
+    denv['DPACKAGER_TOOL'] = 'podman'
+    denv['DOCKER_IMAGE'] = image
+    denv.update(env_overwrite)
+    env_export_arg=''
+    for e in env_export:
+        env_export_arg = ' -e {e}=${e}'
+    encoding = 'utf-8' if capture_output else None
+    return subprocess.run(f"{workspace}/tools/packaging/dpackager {env_export_arg} -- {cmdline}", shell=True, check=True, cwd=cwd, env=denv, capture_output=capture_output, encoding=encoding)
+
 @task
 def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, tag_test=True):
     print(f'Jenkins params:{c.persisted.dict()}')
+    subprocess.run(f'{workspace}/tools/packaging/pull_image', shell=True, check=True)
     if distro != 'ubuntu:20.04' and distro != 'centos:7':
         raise Exception('Unsupported distro')
     if not test_existing_ami_id:
@@ -65,16 +77,13 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
         print(f'repo_url:{repo_url}')
 
         shutil.copyfile('./json_files/ami_variables.json', './scylla-machine-image/aws/ami/variables.json')
-        ami_env = os.environ.copy()
-        ami_env['DPACKAGER_TOOL'] = 'podman'
         if distro == 'ubuntu:20.04':
-            ami_env['DOCKER_IMAGE'] = 'image_ubuntu20.04'
+            dpackager_image = 'image_ubuntu20.04'
             script_name = './build_deb_ami.sh'
         else:
-            ami_env['DOCKER_IMAGE'] = 'image_fedora-33'
+            dpackager_image = 'image_fedora-33'
             script_name = './build_ami.sh'
-        with c.cd('./scylla-machine-image/aws/ami'):
-            c.run(f'{workspace}/tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- {script_name} --product {product_name} --repo {repo_url} --log-file {workspace}/ami.log', env=ami_env)
+        dpackager(f'{script_name} --product {product_name} --repo {repo_url} --log-file {workspace}/ami.log', workspace, image=dpackager_image, env_export=['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'], cwd='./scylla-machine-image/aws/ami')
         with open('./ami.log') as f:
             ami_log = f.read()
         match = re.search(r'^us-east-1: (.+)$', ami_log, flags=re.MULTILINE)
@@ -92,12 +101,8 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
     metadata.commit()
 
     if not test_existing_ami_id and tag_test:
-        ami_env = os.environ.copy()
-        ami_env['DPACKAGER_TOOL'] = 'podman'
-        ami_env['DOCKER_IMAGE'] = 'image_fedora-33'
-        res = c.run(f'./tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- bash -c "aws ec2 --region {ami_default_test_region} describe-tags --filters Name=resource-id,Values={ami_id} Name=key,Values=ScyllaVersion > version_tag.json"', env=ami_env)
-        with open('version_tag.json') as f:
-            version_tag_json = json.loads(f.read())
+        version_tag_json_txt = dpackager(f'aws ec2 --region {ami_default_test_region} describe-tags --filters Name=resource-id,Values={ami_id} Name=key,Values=ScyllaVersion', workspace, env_export=['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'], cwd='./scylla-machine-image/aws/ami', capture_output=True).stdout.strip()
+        version_tag_json = json.loads(version_tag_json_txt)
         version_tag = version_tag_json['Tags'][0]['Value']
         if version_tag.startswith(f'{scylla_version}-{scylla_release}'):
             print(f'Success: AMI tag version: |{version_tag}|. Contains |{scylla_version}| and |{scylla_release}| as expected')
