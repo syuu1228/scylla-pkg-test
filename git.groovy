@@ -45,18 +45,6 @@ boolean shaValue(String value) {
 	}
 }
 
-def remoteBranchSha(String repoURL, String branch) {
-	if (shaValue(branch)) {
-		return branch
-	}
-	String lastShaOnBranch = ""
-	sshagent(["github-promoter"]) {
-		lastShaOnBranch = sh(script: "git ls-remote --heads $repoURL $branch | awk '{print \$1}'", returnStdout: true).trim()
-	}
-	echo "Last SHA of repo: |$repoURL|, branch: |$branch|: |$lastShaOnBranch|"
-	return lastShaOnBranch
-}
-
 def checkoutToDir(String gitURL, String branch, String checkoutDir = WORKSPACE, boolean disableSubmodulesParam = false) {
 	println "checkoutToDir: Checkout git repo: |" + gitURL + "| branch: |$branch| dir: |$checkoutDir| disableSubmodulesParam: |$disableSubmodulesParam|"
 	boolean dirExists = fileExists checkoutDir
