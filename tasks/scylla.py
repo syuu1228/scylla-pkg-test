@@ -6,8 +6,6 @@ import shutil
 from invoke import task, Collection
 import requests
 
-console = Console(color_system=None)
-
 @task()
 def build(c):
     with c.cd('./scylla'):
