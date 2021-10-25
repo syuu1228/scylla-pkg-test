@@ -13,7 +13,6 @@ machine_image_repo = 'git@github.com:scylladb/scylla-machine-image.git'
 machine_image_branch = 'master'
 machine_image_checkout_dir = 'scylla-machine-image'
 
-console = Console(color_system=None)
 workspace = str(Path(__file__).parent.parent)
 
 general_p = properties_parser('general.properties')
