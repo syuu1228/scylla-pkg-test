@@ -40,9 +40,9 @@ def dpackager(cmdline, topdir, image='image_fedora-33', env_export={}, env_overw
     encoding = 'utf-8' if capture_output else None
     try:
         return subprocess.run(f"{topdir}/tools/packaging/dpackager {env_export_arg} -- {cmdline}", shell=True, check=True, cwd=cwd, env=denv, capture_output=capture_output, encoding=encoding)
-    except CalledProcessError as e:
+    except subprocess.CalledProcessError as e:
         print(f'args:{e.args}')
-        print('returncode:{e.returncode}')
+        print(f'returncode:{e.returncode}')
         print('stdout:')
         print(e.stdout)
         print('stderr:')
