@@ -38,7 +38,16 @@ def dpackager(cmdline, topdir, image='image_fedora-33', env_export={}, env_overw
     for e in env_export:
         env_export_arg = ' -e {e}=${e}'
     encoding = 'utf-8' if capture_output else None
-    return subprocess.run(f"{topdir}/tools/packaging/dpackager {env_export_arg} -- {cmdline}", shell=True, check=True, cwd=cwd, env=denv, capture_output=capture_output, encoding=encoding)
+    try:
+        return subprocess.run(f"{topdir}/tools/packaging/dpackager {env_export_arg} -- {cmdline}", shell=True, check=True, cwd=cwd, env=denv, capture_output=capture_output, encoding=encoding)
+    except CalledProcessError as e:
+        print(f'args:{e.args}')
+        print('returncode:{e.returncode}')
+        print('stdout:')
+        print(e.stdout)
+        print('stderr:')
+        print(e.stderr)
+        raise
 
 @task
 def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, tag_test=True):
