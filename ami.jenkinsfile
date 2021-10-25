@@ -49,8 +49,7 @@ pipeline {
         stage('build') {
             steps {
                 script {
-                    /* hardcoding node for getting locally saved api token */
-                    node('sif') {
+                    node('packager') {
                         git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
                         git.checkoutToDir(relengRepo, relengBranch, relengCheckoutDir, disableSubmodules)
                         dir(relengCheckoutDir) {
