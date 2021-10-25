@@ -10,6 +10,11 @@ import requests
 import json
 from pathlib import Path
 from scylla_arms.configparser import properties_parser, build_metadata_parser
+import git
+
+machine_image_repo = 'git@github.com:scylladb/scylla-machine-image.git'
+machine_image_branch = 'master'
+machine_image_checkout_dir = 'scylla-machine-image'
 
 console = Console(color_system=None)
 workspace = str(Path(__file__).parent.parent)
@@ -30,6 +35,7 @@ product_name = branch_p.get('productName')
 @task
 def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, tag_test=True):
     print(f'Jenkins params:{c.persisted.dict()}')
+    repo = Repo.clone_from(machine_image_repo, machine_image_branch, machine_image_checkout_dir)
     if distro != 'ubuntu:20.04' and distro != 'centos:7':
         raise Exception('Unsupported distro')
     if not test_existing_ami_id:

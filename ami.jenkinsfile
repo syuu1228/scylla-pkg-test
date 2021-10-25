@@ -29,6 +29,9 @@ pipeline {
                     /* hardcoding node for getting locally saved api token */
                     node('sif') {
                         checkout scm
+                        if (params.PRESERVE_WORKSPACE) {
+                            cleanWs()
+                        }
                         if (params.RUN_AMI_VERSION_TAG_TEST) {
                             tagTest = '--tag-test'
                         } else {
@@ -39,6 +42,10 @@ pipeline {
                         archiveArtifacts artifacts: "00-Build.txt"
                         archiveArtifacts artifacts: "ami.log"
                         archiveArtifacts artifacts: "amiId.properties"
+t 
+                        if (params.PRESERVE_WORKSPACE) {
+                            cleanWs()
+                        }
                     }
                 }
             }
