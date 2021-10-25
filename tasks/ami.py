@@ -32,8 +32,8 @@ product_name = branch_p.get('productName')
 
 class AmiSettings(Settings):
     skip_test: bool
-    artifact_source_job_name: str
-    artifact_source_build_num: str
+    artifact_source_job_name: str = ''
+    artifact_source_build_num: str = ''
     artifact_web_url: str
 
 def dpackager(cmdline, topdir, image='image_fedora-33', env_export={}, env_overwrite=[], cwd=None, capture_output=False):
