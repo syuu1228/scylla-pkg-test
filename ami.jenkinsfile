@@ -32,13 +32,16 @@ pipeline {
         stage('prepare') {
             steps {
                 script {
-                    git = load "git.groovy"
-                    machineImageRepo = params.MACHINE_IMAGE_REPO ?: "git@github.com:scylladb/scylla-machine-image"
-                    machineImageBranch = params.MACHINE_IMAGE_BRANCH ?: "master"
-                    machineImageCheckoutDir = "scylla-machine-image"
-                    relengRepo = params.RELENG_REPO ?: "git@github.com:syuu1228/scylla-pkg-test"
-                    relengBranch = params.RELENG_BRANCH ?: "master"
-                    relengCheckoutDir = "scylla-pkg-test"
+                    git = load 'git.groovy'
+                    machineImageRepo = params.MACHINE_IMAGE_REPO ?: 'git@github.com:scylladb/scylla-machine-image'
+                    machineImageBranch = params.MACHINE_IMAGE_BRANCH ?: 'master'
+                    machineImageCheckoutDir = 'scylla-machine-image'
+                    relengRepo = params.RELENG_REPO ?: 'git@github.com:syuu1228/scylla-pkg-test'
+                    relengBranch = params.RELENG_BRANCH ?: 'master'
+                    relengCheckoutDir = 'scylla-pkg-test'
+                    clusterTestsRepo = 'git@github.com:scylladb/scylla-cluster-tests'
+                    clusterTestsBranch = 'master'
+                    clusterTestsCheckoutDir = 'scylla-cluster-tests'
                     disableSubmodules = true
                 }
             }
@@ -77,9 +80,13 @@ t
                 script {
                     /* hardcoding node for running SCT */
                     node('aws-sct-builders-us-east-1-new') {
-                        checkout scm
-                        writeFile file: "$WORKSPACE/amiId.properties", text: amiProperties
-                        sh "JENKINS_PARAMS='${params}' ./run_task.sh ami.test"
+                        git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+                        git.checkoutToDir(relengRepo, relengBranch, relengCheckoutDir, disableSubmodules)
+                        dir(relengCheckoutDir) {
+                            git.checkoutToDir(clusterTestsRepo, clusterTestsBranch, clusterTestsCheckoutDir)
+                            writeFile file: "$WORKSPACE/amiId.properties", text: amiProperties
+                            sh "JENKINS_PARAMS='${params}' ./run_task.sh ami.test"
+                        }
                     }
                 }
             }
