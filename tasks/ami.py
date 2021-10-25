@@ -36,23 +36,6 @@ class AmiSettings(Settings):
     artifact_source_build_num: str = ''
     artifact_web_url: str
 
-def dpackager(cmdline, topdir, image='image_fedora-33', env_export={}, env_overwrite=[], cwd=None, capture_output=False):
-    denv = os.environ.copy()
-    denv['DPACKAGER_TOOL'] = 'podman'
-    denv['DOCKER_IMAGE'] = image
-    denv.update(env_overwrite)
-    print(f'denv:\n{denv}')
-    env_export_arg=''
-    for e in env_export:
-        env_export_arg = f' -e {e}=${e}'
-    encoding = 'utf-8' if capture_output else None
-    try:
-        return subprocess.run(f"{topdir}/tools/packaging/dpackager {env_export_arg} -- {cmdline}", shell=True, check=True, cwd=cwd, env=denv, capture_output=capture_output, encoding=encoding)
-    except subprocess.CalledProcessError as e:
-        print(f'args:{e.args}')
-        print(f'returncode:{e.returncode}')
-        raise
-
 @task
 def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, tag_test=True):
 #    settings = AmiSettings()
@@ -63,6 +46,7 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
 #    print(f'ENV:\n{os.environ}')
     if distro != 'ubuntu:20.04' and distro != 'centos:7':
         raise Exception('Unsupported distro')
+    c.run('./tools/packaging/pull_image')
     if not test_existing_ami_id:
         if artifact_url != 'latest':
             r = requests.get(f'http://{artifact_url}/{build_metadata_file}')
@@ -95,19 +79,17 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
         print(f'repo_url:{repo_url}')
 
         shutil.copyfile('./json_files/ami_variables.json', './scylla-machine-image/aws/ami/variables.json')
-        build_dir=f'{topdir}/scylla-machine-image/aws/ami'
         if distro == 'ubuntu:20.04':
             dpackager_image = 'image_ubuntu20.04'
-            script_name = f'{build_dir}/build_deb_ami.sh'
+            script_name = './build_deb_ami.sh'
         else:
             dpackager_image = 'image_fedora-33'
-            script_name = f'{build_dir}/build_ami.sh'
-        dpackager(f'{script_name} --product {product_name} --repo {repo_url} --log-file {topdir}/ami.log', topdir, image=dpackager_image, env_export=['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'], cwd=build_dir)
-#        ami_env = os.environ.copy()
-#        ami_env['DPACKAGER_TOOL'] = 'podman'
-#        ami_env['DOCKER_IMAGE'] = dpackager_image
-#        with c.cd('./scylla-machine-image/aws/ami'):
-#            c.run(f'{topdir}/tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- {script_name} --product {product_name} --repo {repo_url} --log-file {topdir}/ami.log', env=ami_env)
+            script_name = f'./build_ami.sh'
+        ami_env = os.environ.copy()
+        ami_env['DPACKAGER_TOOL'] = 'podman'
+        ami_env['DOCKER_IMAGE'] = dpackager_image
+        with c.cd('./scylla-machine-image/aws/ami'):
+            c.run(f'{topdir}/tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- {script_name} --product {product_name} --repo {repo_url} --log-file {topdir}/ami.log', env=ami_env)
         with open('./ami.log') as f:
             ami_log = f.read()
         match = re.search(r'^us-east-1: (.+)$', ami_log, flags=re.MULTILINE)
@@ -125,7 +107,10 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
     metadata.commit()
 
     if not test_existing_ami_id and tag_test:
-        version_tag_json_txt = dpackager(f'aws ec2 --region {ami_default_test_region} describe-tags --filters Name=resource-id,Values={ami_id} Name=key,Values=ScyllaVersion', topdir, env_export=['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'], cwd='./scylla-machine-image/aws/ami', capture_output=True).stdout.strip()
+        ami_env = os.environ.copy()
+        ami_env['DPACKAGER_TOOL'] = 'podman'
+        ami_env['DOCKER_IMAGE'] = 'image_fedora-33'
+        version_tag_json_txt = c.run(f'./tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- bash -c "aws ec2 --region {ami_default_test_region} describe-tags --filters Name=resource-id,Values={ami_id} Name=key,Values=ScyllaVersion"', env=ami_env).stdout
         version_tag_json = json.loads(version_tag_json_txt)
         version_tag = version_tag_json['Tags'][0]['Value']
         if version_tag.startswith(f'{scylla_version}-{scylla_release}'):
