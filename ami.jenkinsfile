@@ -84,7 +84,7 @@ t
                         git.checkoutToDir(relengRepo, relengBranch, relengCheckoutDir, disableSubmodules)
                         dir(relengCheckoutDir) {
                             git.checkoutToDir(clusterTestsRepo, clusterTestsBranch, clusterTestsCheckoutDir)
-                            writeFile file: "$WORKSPACE/amiId.properties", text: amiProperties
+                            writeFile file: "amiId.properties", text: amiProperties
                             sh "JENKINS_PARAMS='${params}' ./run_task.sh ami.test"
                         }
                     }
