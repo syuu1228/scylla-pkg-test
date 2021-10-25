@@ -97,3 +97,5 @@ def cleanWorkSpaceUponRequest(boolean preserveWorkSpace = false) {
 		// Clean docker images older then 2 weeks to save disk space. The which docker is to prevent error when no docker installed.
 	}
 }
+
+return this
