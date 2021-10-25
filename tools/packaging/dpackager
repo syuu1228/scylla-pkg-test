@@ -10,11 +10,10 @@ else
         image_file="image_fedora-33"
 fi
 image="$(<"$here/$image_file")"
-echo $image
 
-if which docker >/dev/null 2>&1 ; then
-  container_tool=${DPACKAGER_TOOL-docker}
-elif which podman >/dev/null 2>&1 ; then
+#if which docker >/dev/null 2>&1 ; then
+#  container_tool=${DPACKAGER_TOOL-docker}
+if which podman >/dev/null 2>&1 ; then
   container_tool=${DPACKAGER_TOOL-podman}
 else
   die "Please make sure you install either podman or docker on this machine to run dbuild"
