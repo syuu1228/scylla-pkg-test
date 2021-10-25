@@ -28,8 +28,8 @@ pipeline {
                 script {
                     /* hardcoding node for getting locally saved api token */
                     node('sif') {
-                        checkout scm
                         cleanWs()
+                        checkout scm
                         if (params.RUN_AMI_VERSION_TAG_TEST) {
                             tagTest = '--tag-test'
                         } else {
