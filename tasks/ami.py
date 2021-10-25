@@ -13,6 +13,19 @@ from pathlib import Path
 console = Console(color_system=None)
 workspace = str(Path(__file__).parent.parent)
 
+general_p = properties_parser('general.properties')
+branch_p = properties_parser('branch-specific.properties')
+
+build_metadata_file = general_p.get('buildMetadataFile')
+ami_id_file = general_p.get('amiIdFile')
+ami_default_test_region = general_p.get('amiDefaultTestRegion')
+
+called_builds_dir = branch_p.get('calledBuildsDir')
+unified_deb_job_name = branch_p.get('unifiedDebJobName')
+centos_job_name = branch_p.get('centosJobName')
+scylla_unified_pkg_repo = branch_p.get('scyllaUnifiedPkgRepo')
+product_name = branch_p.get('productName')
+
 def get_value_from_metadata(metadata, tag):
     match = re.search(rf'^{tag}: (.+)$', metadata, re.MULTILINE)
     if not match:
@@ -25,35 +38,33 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
         raise Exception('Unsupported distro')
     if not test_existing_ami_id:
         if artifact_url != 'latest':
-            r = requests.get(f'http://{artifact_url}/00-Build.txt')
+            r = requests.get(f'http://{artifact_url}/{build_metadata_file}')
             r.raise_for_status()
             metadata = r.text
         else:
             if not job_name:
                 if distro == 'ubuntu:20.04':
-                    job_name = '/scylla-master/job/unified-deb'
+                    job_name = f'{called_builds_dir}/job/{unified_deb_job_name}'
+                    metadata_url_field_name = 'unified-deb-url'
                 else:
-                    job_name = '/scylla-master/job/centos-rpm'
+                    job_name = f'{called_builds_dir}/job/{centos_job_name}'
+                    metadata_url_field_name = 'centos-rpm-repo-url'
             if not build_num:
                 build_num = 'lastSuccessfulBuild'
             with open('/var/tmp/takuya-api-token.txt') as f:
                 token = f.read().strip()
-            r = requests.get(f'https://jenkins.scylladb.com/view/master/job{job_name}/{build_num}/artifact/00-Build.txt', auth=('syuu1228',token))
+            r = requests.get(f'https://jenkins.scylladb.com/view/master/job{job_name}/{build_num}/artifact/{build_metadata_file}', auth=('syuu1228',token))
             r.raise_for_status()
-            metadata = r.text
-        with open('./00-Build.txt', 'w') as f:
-            f.write(metadata)
-        print('[00-Build.txt]\n{}\n'.format(metadata))
-        scylla_release = get_value_from_metadata(metadata, 'scylla-release')
-        scylla_version = get_value_from_metadata(metadata, 'scylla-version')
+            metadata_txt = r.text
+        with open(build_metadata_file, 'w') as f:
+            f.write(metadata_txt)
+        print(f'[{build_metadata_file}]\n{metadata_txt}\n')
+        metadata = build_metadata_parser(build_metadata_file)
+        scylla_release = metadata.get('scylla-release')
+        scylla_version = metadata.get('scylla-version')
+        repo_url = 'http://' + metadata.get(metadata_url_field_name)
         if distro == 'ubuntu:20.04':
-            artifact_url = get_value_from_metadata(metadata, 'unified-deb-url')
-        else:
-            artifact_url = get_value_from_metadata(metadata, 'centos-rpm-url')
-        if distro == 'ubuntu:20.04':
-            repo_url = f'http://{artifact_url}scylladb-master/scylla.list'
-        else:
-            repo_url = f'http://{artifact_url}scylla.repo'
+            repo_url += scylla_unified_pkg_repo + '/scylla.list'
         print(f'repo_url:{repo_url}')
 
         shutil.copyfile('./json_files/ami_variables.json', './scylla-machine-image/aws/ami/variables.json')
@@ -66,7 +77,7 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
             ami_env['DOCKER_IMAGE'] = 'image_fedora-33'
             script_name = './build_ami.sh'
         with c.cd('./scylla-machine-image/aws/ami'):
-            c.run(f'{workspace}/tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- {script_name} --product scylla --repo {repo_url} --log-file {workspace}/ami.log', env=ami_env)
+            c.run(f'{workspace}/tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- {script_name} --product {product_name} --repo {repo_url} --log-file {workspace}/ami.log', env=ami_env)
         with open('./ami.log') as f:
             ami_log = f.read()
         match = re.search(r'^us-east-1: (.+)$', ami_log, flags=re.MULTILINE)
@@ -76,17 +87,18 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
     else:
         ami_id = test_existing_ami_id
 
-    with open('./amiId.properties', 'w') as f:
-        f.write(f'scylla_ami_id={ami_id}\n')
-    with open('./00-Build.txt', 'a') as f:
-        f.write(f'scylla-ami-id: {ami_id}\n')
-        f.write(f'ami-base-os: {distro}\n')
+    ami_id_p = properties_parser(ami_id_file)
+    ami_id_p.set('scylla_ami_id', ami_id)
+    ami_id_p.commit()
+    metadata.set('scylla-ami-id', ami_id)
+    metadata.set('ami-base-os', distro)
+    metadata.commit()
 
     if not test_existing_ami_id and tag_test:
         ami_env = os.environ.copy()
         ami_env['DPACKAGER_TOOL'] = 'podman'
         ami_env['DOCKER_IMAGE'] = 'image_fedora-33'
-        res = c.run(f'./tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- bash -c "aws ec2 --region us-east-1 describe-tags --filters Name=resource-id,Values={ami_id} Name=key,Values=ScyllaVersion > version_tag.json"', env=ami_env)
+        res = c.run(f'./tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- bash -c "aws ec2 --region {ami_default_test_region} describe-tags --filters Name=resource-id,Values={ami_id} Name=key,Values=ScyllaVersion > version_tag.json"', env=ami_env)
         with open('version_tag.json') as f:
             version_tag_json = json.loads(f.read())
         version_tag = version_tag_json['Tags'][0]['Value']
@@ -98,13 +110,13 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
 
 @task
 def test(c):
-    with open('./amiId.properties') as f:
-        properties = f.read()
-    print(properties)
-    match = re.search(r'^scylla_ami_id=(.+)$', properties, flags=re.MULTILINE)
-    if not match:
-        raise Exception("Missing AMI ID. Expected property scylla_ami_id on file amiPropertiesFile created on build phase. Can't run tests")
-    ami_id = match.group(1)
+    if not os.path.exists(ami_id_file):
+        raise Exception(f'{ami_id_file} does not exist')
+
+    ami_id_p = properties_parser(ami_id_file)
+    ami_id = ami_id_p.get('scylla_ami_id')
+    print('scylla_ami_id:{ami_id}')
+
     sct_env = os.environ.copy()
     sct_env['SCT_COLLECT_LOGS'] = 'false'
     sct_env['SCT_CONFIG_FILES'] = 'test-cases/artifacts/ami.yaml'
