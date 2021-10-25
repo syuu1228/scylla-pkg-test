@@ -58,11 +58,9 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
     settings = AmiSettings()
     config = c.persisted
     config.clear()
-    config.update(**setting.dict())
+    config.update(**settings.dict())
     print(f'configuration:\n{config.dict()}')
-    c.persisted.update(os.environ['JENKINS_PARAMS'])
     print(f'ENV:\n{os.environ}')
-    print(f'Jenkins params:\n{c.persisted.dict()}')
     if distro != 'ubuntu:20.04' and distro != 'centos:7':
         raise Exception('Unsupported distro')
     if not test_existing_ami_id:
