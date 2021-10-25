@@ -4,8 +4,6 @@ import sys
 import re
 import shutil
 from invoke import task, Collection
-from rich import print  # pylint: disable=redefined-builtin
-from rich.console import Console
 import requests
 
 console = Console(color_system=None)
