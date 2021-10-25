@@ -2,13 +2,19 @@
 
 pipeline {
     parameters {
+        string(name: 'MACHINE_IMAGE_BRANCH', defaultValue: '', description: 'Branch for ami. If empty - will take stable branch (master)')
+        string(name: 'MACHINE_IMAGE_REPO', defaultValue: '', description: 'Repo for ami. If empty - will take scylla repo')
+        choice(name: 'OS_DISTRO', choices: ['ubuntu:20.04', 'centos:7'], description: 'Choose on which OS the AMI will be build. Please note that centos:7 is kept for end cases manual use')
+        string(name: 'TEST_EXISTING_AMI_ID', defaultValue: '', description: 'AMI ID to test. If empty - will build a new AMI')
+        booleanParam(name: 'SKIP_TEST', defaultValue: false, description: 'Set to skip ami test - for debug use')
         string(name: 'ARTIFACT_SOURCE_JOB_NAME', defaultValue: '', description: 'Build path to take artifacts from (usually unified-deb). Use with ARTIFACT_SOURCE_BUILD_NUM to take artifacts from Jenkins, or ARTIFACT_WEB_URL to take them from cloud.')
         string(name: 'ARTIFACT_SOURCE_BUILD_NUM', defaultValue: '', description: 'Build number to take artifacts from. Leave empty to use last available build. Use with ARTIFACT_SOURCE_JOB_NAME to take artifacts from Jenkins, or ARTIFACT_WEB_URL to take them from cloud.')
         string(name: 'ARTIFACT_WEB_URL', defaultValue: 'latest', description: 'URL of deb (or RPM) repo created by unified-deb (or CentOS-RPM) process. Use when not available on jenkins, or when running on AWS, which will download faster from S3.')
-		choice(name: 'OS_DISTRO', choices: ['ubuntu:20.04', 'centos:7'], description: 'Choose on which OS the AMI will be build. Please note that centos:7 is kept for end cases manual use')
-        string(name: 'TEST_EXISTING_AMI_ID', defaultValue: '', description: 'AMI ID to test. If empty - will build a new AMI')
+        string(name: 'RELENG_REPO', defaultValue: '', description: 'Branch of pkg repo or fork. If empty - will take scylla-pkg repo (examples: git@github.com:scylladb/scylla-pkg, git@github.com:scylladb/scylla-enterprise-pkg, git@github.com:hagitsegev/scylla-pkg)')
+        string(name: 'RELENG_BRANCH', defaultValue: '', description: 'Branch of pkg repo. If empty - will take stable branch (master)')
         booleanParam(name: 'SKIP_TEST', defaultValue: false, description: 'Set to skip ami test - for debug use')
         booleanParam(name: 'RUN_AMI_VERSION_TAG_TEST', defaultValue: false, description: 'Set to run releng AMI version tag verification')
+        booleanParam(name: 'PRESERVE_WORKSPACE', defaultValue: false, description: 'Set to avoid cleaning workspace before and after run, for debug needs')
     }
 
     agent {
@@ -23,13 +29,28 @@ pipeline {
     }
 
     stages {
+        stage('prepare') {
+            steps {
+                script {
+                    git = load "git.groovy"
+                    machineImageRepo = params.MACHINE_IMAGE_REPO ?: "git@github.com:scylladb/scylla-machine-image.git"
+                    machineImageBranch = params.MACHINE_IMAGE_BRANCH ?: "master"
+                    machineImageSha = git.remoteBranchSha(machineImageRepo, machineImageBranch)
+                    machineImageCheckoutDir = "scylla-pkg-test/scylla-machine-image"
+                    relengRepo = params.RELENG_REPO ?: "git@github.com:syuu1228/scylla-pkg-test.git"
+                    relengBranch = params.RELENG_BRANCH ?: "master"
+                    relengCheckoutDir = "scylla-pkg-test"
+                }
+            }
+        }
         stage('build') {
             steps {
                 script {
                     /* hardcoding node for getting locally saved api token */
                     node('sif') {
-                        cleanWs()
-                        checkout scm
+                        git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
+                        git.checkoutToDir(relengRepo, relengBranch, relengCheckoutDir, disableSubmodules)
+                        git.checkoutToDir(machineImageRepo, machineImageSha, machineImageCheckoutDir)
                         if (params.RUN_AMI_VERSION_TAG_TEST) {
                             tagTest = '--tag-test'
                         } else {
@@ -41,7 +62,7 @@ pipeline {
                         archiveArtifacts artifacts: "ami.log"
                         archiveArtifacts artifacts: "amiId.properties"
 t 
-                        cleanWs()
+                        git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
                     }
                 }
             }
