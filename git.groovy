@@ -40,7 +40,7 @@ def remoteBranchSha(String repoURL, String branch) {
 		return branch
 	}
 	String lastShaOnBranch = ""
-	sshagent([generalProperties.gitUser]) {
+	sshagent(["github-promoter"]) {
 		lastShaOnBranch = sh(script: "git ls-remote --heads $repoURL $branch | awk '{print \$1}'", returnStdout: true).trim()
 	}
 	echo "Last SHA of repo: |$repoURL|, branch: |$branch|: |$lastShaOnBranch|"
