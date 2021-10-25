@@ -41,7 +41,7 @@ def dpackager(cmdline, topdir, image='image_fedora-33', env_export={}, env_overw
     denv['DPACKAGER_TOOL'] = 'podman'
     denv['DOCKER_IMAGE'] = image
     denv.update(env_overwrite)
-    print(f'denv:\n{denv.dict()}')
+    print(f'denv:\n{denv}')
     env_export_arg=''
     for e in env_export:
         env_export_arg = f' -e {e}=${e}'
