@@ -35,6 +35,16 @@ def doCheckout (String gitURL, String branch, boolean disableSubmodulesParam = f
 	])
 }
 
+boolean shaValue(String value) {
+	if (value =~ /^[0-9a-f]+$/) {
+		echo "|$value| is a sha"
+		return true
+	} else {
+		echo "|$value| is not a sha"
+		return false
+	}
+}
+
 def remoteBranchSha(String repoURL, String branch) {
 	if (shaValue(branch)) {
 		return branch
