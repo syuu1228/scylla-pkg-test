@@ -15,7 +15,7 @@ class jenkins_configparser:
         self._data += f'{key}{self.spacer_left}{self.delimiter}{self.spacer_right}{val}\n'
         self.__load()
 
-    def __init__(self, filename, spacer_left, delimiter, spacer_right):
+    def __init__(self, filename, spacer_left, delimiter, spacer_right, new_file=False):
         self.spacer_left = spacer_left
         self.delimiter = delimiter
         self.spacer_right= spacer_right
@@ -23,7 +23,7 @@ class jenkins_configparser:
             self._filename = str(filename)
         else:
             self._filename = filename
-        if not os.path.exists(filename):
+        if new_file and not os.path.exists(filename):
             open(filename, 'a').close()
         with open(filename) as f:
             self._data = f.read()
@@ -46,9 +46,9 @@ class jenkins_configparser:
             f.write(self._data)
 
 class properties_parser(jenkins_configparser):
-    def __init__(self, filename):
-        super().__init__(filename, '', '=', '')
+    def __init__(self, filename, new_file=False):
+        super().__init__(filename, '', '=', '', new_file)
 
 class build_metadata_parser(jenkins_configparser):
-    def __init__(self, filename):
-        super().__init__(filename, '', ':', ' ')
+    def __init__(self, filename, new_file=False):
+        super().__init__(filename, '', ':', ' ', new_file)
