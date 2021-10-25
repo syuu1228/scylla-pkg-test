@@ -101,7 +101,12 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
         else:
             dpackager_image = 'image_fedora-33'
             script_name = './build_ami.sh'
-        dpackager(f'{script_name} --product {product_name} --repo {repo_url} --log-file {topdir}/ami.log', topdir, image=dpackager_image, env_export=['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'], cwd='./scylla-machine-image/aws/ami')
+#        dpackager(f'{script_name} --product {product_name} --repo {repo_url} --log-file {topdir}/ami.log', topdir, image=dpackager_image, env_export=['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'], cwd='./scylla-machine-image/aws/ami')
+        ami_env = os.environ.copy()
+        ami_env['DPACKAGER_TOOL'] = 'podman'
+        ami_env['DOCKER_IMAGE'] = dpackager_image
+        with c.cd('./scylla-machine-image/aws/ami'):
+            c.run(f'{workspace}/tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- {script_name} --product {product_name} --repo {repo_url} --log-file {workspace}/ami.log', env=ami_env)
         with open('./ami.log') as f:
             ami_log = f.read()
         match = re.search(r'^us-east-1: (.+)$', ami_log, flags=re.MULTILINE)
