@@ -6,6 +6,7 @@ import shutil
 from invoke import task, Collection
 import requests
 import json
+import subprocess
 from pathlib import Path
 from scylla_arms.configparser import properties_parser, build_metadata_parser
 
