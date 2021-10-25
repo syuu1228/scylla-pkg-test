@@ -43,7 +43,6 @@ def dpackager(cmdline, topdir, image='image_fedora-33', env_export={}, env_overw
 @task
 def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, tag_test=True):
     print(f'Jenkins params:{c.persisted.dict()}')
-    subprocess.run(f'{topdir}/tools/packaging/pull_image', shell=True, check=True)
     if distro != 'ubuntu:20.04' and distro != 'centos:7':
         raise Exception('Unsupported distro')
     if not test_existing_ami_id:
