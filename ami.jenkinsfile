@@ -40,6 +40,7 @@ pipeline {
                     relengRepo = params.RELENG_REPO ?: "git@github.com:syuu1228/scylla-pkg-test.git"
                     relengBranch = params.RELENG_BRANCH ?: "master"
                     relengCheckoutDir = "scylla-pkg-test"
+                    disableSubmodules = true
                 }
             }
         }
