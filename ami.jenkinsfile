@@ -29,15 +29,12 @@ pipeline {
                     /* hardcoding node for getting locally saved api token */
                     node('sif') {
                         checkout scm
-                        sh "pip3 install virtualenv"
-                        sh "python3 -m virtualenv poc-venv"
-                        sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
                         if (params.RUN_AMI_VERSION_TAG_TEST) {
                             tagTest = '--tag-test'
                         } else {
                             tagTest = '--no-tag-test'
                         }
-                        sh "poc-venv/bin/invoke ami.build --job-name=${params.ARTIFACT_SOURCE_JOB_NAME} --build-num=${params.ARTIFACT_SOURCE_BUILD_NUM} --artifact-url=${params.ARTIFACT_WEB_URL} --distro=${params.OS_DISTRO} --test-existing-ami-id=${params.TEST_EXISTING_AMI_ID} ${tagTest}"
+                        sh "./run_task.sh ami.build --job-name=${params.ARTIFACT_SOURCE_JOB_NAME} --build-num=${params.ARTIFACT_SOURCE_BUILD_NUM} --artifact-url=${params.ARTIFACT_WEB_URL} --distro=${params.OS_DISTRO} --test-existing-ami-id=${params.TEST_EXISTING_AMI_ID} ${tagTest}"
                         amiProperties = readFile file: "$WORKSPACE/amiId.properties"
                         archiveArtifacts artifacts: "00-Build.txt"
                         archiveArtifacts artifacts: "ami.log"
@@ -56,10 +53,7 @@ pipeline {
                     node('aws-sct-builders-us-east-1-new') {
                         checkout scm
                         writeFile file: "$WORKSPACE/amiId.properties", text: amiProperties
-                        sh "pip3 install virtualenv"
-                        sh "python3 -m virtualenv poc-venv"
-                        sh "source poc-venv/bin/activate && pip3 install invoke rich requests"
-                        sh "poc-venv/bin/invoke ami.test"
+                        sh "./run_task.sh ami.test"
                     }
                 }
             }
