@@ -65,7 +65,6 @@ pipeline {
                             archiveArtifacts artifacts: "ami.log"
                             archiveArtifacts artifacts: "amiId.properties"
                         }
-t 
                         git.cleanWorkSpaceUponRequest(params.PRESERVE_WORKSPACE)
                     }
                 }
