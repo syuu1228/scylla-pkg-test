@@ -46,7 +46,7 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
             if not job_name:
                 job_name = f'{called_builds_dir}/job/{centos_job_name}'
             metadata_url_field_name = 'centos-rpm-repo-url'
-        repo_url = artifact.fetch_metadata_value(job_name, build_num, metadata_url_field_name, artifact_url == 'latest' ? None else artifact_url)
+        repo_url = artifact.fetch_metadata_value(job_name, build_num, metadata_url_field_name, None if artifact_url == 'latest' else artifact_url)
         metadata = build_metadata_parser(build_metadata_file)
         scylla_release = metadata.get('scylla-release')
         scylla_version = metadata.get('scylla-version')
