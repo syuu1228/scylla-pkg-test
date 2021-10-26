@@ -6,11 +6,13 @@ general_p = properties_parser('general.properties')
 build_metadata_file = general_p.get('buildMetadataFile')
 server = 'https://jenkins.scylladb.com/'
 user = 'syuu1228'
-with open('/var/tmp/takuya-api-token.txt') as f:
-    token = f.read().strip()
+
+def _get_token():
+    with open('/var/tmp/takuya-api-token.txt') as f:
+        token = f.read().strip()
 
 def _get_job_url(job_name):
-    j = jenkins.Jenkins(server, username = user, password = token)
+    j = jenkins.Jenkins(server, username = user, password = _get_token())
     build_url = j.build_job_url(job_name)
     return build_url.rstrip('build')
 
@@ -20,7 +22,7 @@ def get_artifact(artifact, job_name, build_num, artifact_url=None):
         if not build_num:
             build_num = 'lastSuccessfulBuild'
         print(f'{job_url}/{build_num}/artifact/{artifact}')
-        r = requests.get(f'{job_url}/{build_num}/artifact/{artifact}', auth=(user,token))
+        r = requests.get(f'{job_url}/{build_num}/artifact/{artifact}', auth=(user,_get_token()))
     else:
         print(f'http://{artifact_url}/{artifact}')
         r = requests.get(f'http://{artifact_url}/{artifact}')
