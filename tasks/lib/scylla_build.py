@@ -3,6 +3,9 @@ import shutil
 import re
 from scylla_arms.configparser import properties_parser
 
+branch_p = properties_parser('branch-specific.properties')
+ami_id_file = general_p.get('amiIdFile')
+
 def build_ami(c, repo_url, distro, product_name):
     shutil.copyfile('./json_files/ami_variables.json', './scylla-machine-image/aws/ami/variables.json')
     ami_env = os.environ.copy()
@@ -14,7 +17,7 @@ def build_ami(c, repo_url, distro, product_name):
         ami_env['DOCKER_IMAGE'] = 'image_fedora-33'
         script_name = './build_ami.sh'
     with c.cd('./scylla-machine-image/aws/ami'):
-        c.run(f'../../../tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- {script_name} --product {product_name} --repo {repo_url} --log-file ../../../ami.log', env=ami_env)
+        c.run(f'../../../tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- {script_name} --product {product_name} --repo http://{repo_url} --log-file ../../../ami.log', env=ami_env)
     with open('./ami.log') as f:
         ami_log = f.read()
     match = re.search(r'^us-east-1: (.+)$', ami_log, flags=re.MULTILINE)
