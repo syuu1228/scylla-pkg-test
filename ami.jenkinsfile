@@ -60,7 +60,7 @@ pipeline {
                                 tagTest = '--no-tag-test'
                             }
                             sh "JENKINS_PARAMS='${params}' ./run_task.sh ami.build --job-name=${params.ARTIFACT_SOURCE_JOB_NAME} --build-num=${params.ARTIFACT_SOURCE_BUILD_NUM} --artifact-url=${params.ARTIFACT_WEB_URL} --distro=${params.OS_DISTRO} --test-existing-ami-id=${params.TEST_EXISTING_AMI_ID} ${tagTest}"
-                            amiProperties = readFile file: "${relengCheckoutDir}/amiId.properties"
+                            amiProperties = readFile file: "amiId.properties"
                             archiveArtifacts artifacts: "00-Build.txt"
                             archiveArtifacts artifacts: "ami.log"
                             archiveArtifacts artifacts: "amiId.properties"
