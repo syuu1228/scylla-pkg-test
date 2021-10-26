@@ -19,10 +19,12 @@ def get_artifact(artifact, job_name, build_num, artifact_url=None):
         job_url = _get_job_url(job_name)
         if not build_num:
             build_num = 'lastSuccessfulBuild'
+        print(f'{job_url}/{build_num}/artifact/{artifact}')
         r = requests.get(f'{job_url}/{build_num}/artifact/{artifact}', auth=(user,token))
     else:
+        print(f'http://{artifact_url}/{artifact}')
         r = requests.get(f'http://{artifact_url}/{artifact}')
-        r.raise_for_status()
+    r.raise_for_status()
     with open(artifact, 'w') as f:
         f.write(r.text)
 
