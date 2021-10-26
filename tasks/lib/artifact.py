@@ -29,6 +29,7 @@ def get_artifact(artifact, job_name, build_num, artifact_url=None):
         f.write(r.text)
 
 def fetch_metadata_value(job_name, build_num, field_name, artifact_url=None):
+    job_name='scylla-master/unified-deb'
     get_artifact(build_metadata_file, job_name, build_num, artifact_url)
     metadata = build_metadata_parser(build_metadata_file)
     return metadata.get(field_name)

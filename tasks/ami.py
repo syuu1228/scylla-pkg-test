@@ -40,11 +40,11 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
 
         if distro == 'ubuntu:20.04':
             if not job_name:
-                job_name = f'{called_builds_dir}/job/{unified_deb_job_name}'
+                job_name = f'{called_builds_dir}/{unified_deb_job_name}'
             metadata_url_field_name = 'unified-deb-url'
         else:
             if not job_name:
-                job_name = f'{called_builds_dir}/job/{centos_job_name}'
+                job_name = f'{called_builds_dir}/{centos_job_name}'
             metadata_url_field_name = 'centos-rpm-repo-url'
         repo_url = artifact.fetch_metadata_value(job_name, build_num, metadata_url_field_name, None if artifact_url == 'latest' else artifact_url)
         metadata = build_metadata_parser(build_metadata_file)
