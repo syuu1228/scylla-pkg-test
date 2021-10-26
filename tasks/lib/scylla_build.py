@@ -3,7 +3,7 @@ import shutil
 import re
 from scylla_arms.configparser import properties_parser
 
-branch_p = properties_parser('branch-specific.properties')
+general_p = properties_parser('general.properties')
 ami_id_file = general_p.get('amiIdFile')
 
 def build_ami(c, repo_url, distro, product_name):
