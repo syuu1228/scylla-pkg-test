@@ -9,11 +9,14 @@ import json
 from pathlib import Path
 from scylla_arms.configparser import properties_parser, build_metadata_parser
 
+topdir = str(Path(__file__).parent.parent)
+sys.path.append(f'{topdir}/tasks/lib')
+import scylla_build
+
 machine_image_repo = 'git@github.com:scylladb/scylla-machine-image.git'
 machine_image_branch = 'master'
 machine_image_checkout_dir = 'scylla-machine-image'
 
-workspace = str(Path(__file__).parent.parent)
 
 general_p = properties_parser('general.properties')
 branch_p = properties_parser('branch-specific.properties')
@@ -62,30 +65,12 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
         if distro == 'ubuntu:20.04':
             repo_url += scylla_unified_pkg_repo + '/scylla.list'
         print(f'repo_url:{repo_url}')
-
-        shutil.copyfile('./json_files/ami_variables.json', './scylla-machine-image/aws/ami/variables.json')
-        ami_env = os.environ.copy()
-        ami_env['DPACKAGER_TOOL'] = 'podman'
-        if distro == 'ubuntu:20.04':
-            ami_env['DOCKER_IMAGE'] = 'image_ubuntu20.04'
-            script_name = './build_deb_ami.sh'
-        else:
-            ami_env['DOCKER_IMAGE'] = 'image_fedora-33'
-            script_name = './build_ami.sh'
-        with c.cd('./scylla-machine-image/aws/ami'):
-            c.run(f'{workspace}/tools/packaging/dpackager -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -- {script_name} --product {product_name} --repo {repo_url} --log-file {workspace}/ami.log', env=ami_env)
-        with open('./ami.log') as f:
-            ami_log = f.read()
-        match = re.search(r'^us-east-1: (.+)$', ami_log, flags=re.MULTILINE)
-        if not match:
-            raise Exception('AMI build failed')
-        ami_id = match.group(1)
+        scylla_build.build_ami(c, repo_url, distro, product_name)
     else:
         ami_id = test_existing_ami_id
-
-    ami_id_p = properties_parser(ami_id_file)
-    ami_id_p.set('scylla_ami_id', ami_id)
-    ami_id_p.commit()
+        ami_id_p = properties_parser(ami_id_file)
+        ami_id_p.set('scylla_ami_id', ami_id)
+        ami_id_p.commit()
     metadata.set('scylla-ami-id', ami_id)
     metadata.set('ami-base-os', distro)
     metadata.commit()
