@@ -12,6 +12,7 @@ from scylla_arms.configparser import properties_parser, build_metadata_parser
 topdir = str(Path(__file__).parent.parent)
 sys.path.append(f'{topdir}/tasks/lib')
 import scylla_build
+import artifact
 
 machine_image_repo = 'git@github.com:scylladb/scylla-machine-image.git'
 machine_image_branch = 'master'
@@ -36,32 +37,19 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
     if distro != 'ubuntu:20.04' and distro != 'centos:7':
         raise Exception('Unsupported distro')
     if not test_existing_ami_id:
-        if artifact_url != 'latest':
-            r = requests.get(f'http://{artifact_url}/{build_metadata_file}')
-            r.raise_for_status()
-            metadata = r.text
+
+        if distro == 'ubuntu:20.04':
+            if not job_name:
+                job_name = f'{called_builds_dir}/job/{unified_deb_job_name}'
+            metadata_url_field_name = 'unified-deb-url'
         else:
             if not job_name:
-                if distro == 'ubuntu:20.04':
-                    job_name = f'{called_builds_dir}/job/{unified_deb_job_name}'
-                    metadata_url_field_name = 'unified-deb-url'
-                else:
-                    job_name = f'{called_builds_dir}/job/{centos_job_name}'
-                    metadata_url_field_name = 'centos-rpm-repo-url'
-            if not build_num:
-                build_num = 'lastSuccessfulBuild'
-            with open('/var/tmp/takuya-api-token.txt') as f:
-                token = f.read().strip()
-            r = requests.get(f'https://jenkins.scylladb.com/view/master/job{job_name}/{build_num}/artifact/{build_metadata_file}', auth=('syuu1228',token))
-            r.raise_for_status()
-            metadata_txt = r.text
-        with open(build_metadata_file, 'w') as f:
-            f.write(metadata_txt)
-        print(f'[{build_metadata_file}]\n{metadata_txt}\n')
+                job_name = f'{called_builds_dir}/job/{centos_job_name}'
+            metadata_url_field_name = 'centos-rpm-repo-url'
+        repo_url = artifact.fetch_metadata_value(job_name, build_num, metadata_url_field_name, artifact_url)
         metadata = build_metadata_parser(build_metadata_file)
         scylla_release = metadata.get('scylla-release')
         scylla_version = metadata.get('scylla-version')
-        repo_url = 'http://' + metadata.get(metadata_url_field_name)
         if distro == 'ubuntu:20.04':
             repo_url += scylla_unified_pkg_repo + '/scylla.list'
         print(f'repo_url:{repo_url}')

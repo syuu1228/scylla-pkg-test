@@ -1,6 +1,7 @@
 import os
 import shutil
 import re
+from scylla_arms.configparser import properties_parser
 
 def build_ami(c, repo_url, distro, product_name):
     shutil.copyfile('./json_files/ami_variables.json', './scylla-machine-image/aws/ami/variables.json')
