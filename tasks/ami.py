@@ -60,6 +60,7 @@ def build(c, job_name, build_num, artifact_url, distro, test_existing_ami_id, ta
         ami_id_p.set('scylla_ami_id', ami_id)
         ami_id_p.commit()
         metadata = build_metadata_parser(build_metadata_file, new_file=True)
+        Path('ami.log').touch()
 
     ami_id_p = properties_parser(ami_id_file)
     ami_id = ami_id_p.get('scylla_ami_id')
