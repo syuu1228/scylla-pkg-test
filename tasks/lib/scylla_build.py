@@ -24,6 +24,6 @@ def build_ami(c, repo_url, distro, product_name):
     if not match:
         raise Exception('AMI build failed')
     ami_id = match.group(1)
-    ami_id_p = properties_parser(ami_id_file)
+    ami_id_p = properties_parser(ami_id_file, new_file=True)
     ami_id_p.set('scylla_ami_id', ami_id)
     ami_id_p.commit()
